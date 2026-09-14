@@ -1,0 +1,8 @@
+.build/
+build/
+.DS_Store
+*.xcuserstate
+.swiftpm/
+
+# internal working notes, not part of the published project
+tasks/
