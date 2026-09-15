@@ -281,7 +281,13 @@ The hash covers **exactly the string handed to the CLI**, so `claude-switcher` n
 
 `make bundle` resolves a signing identity in this order: `$CODESIGN_IDENTITY` if set, otherwise the first **Developer ID Application** identity in the keychain, otherwise **ad-hoc** (`codesign --sign -`).
 
-**An ad-hoc build runs only on the machine that built it.** On any other Mac, Gatekeeper rejects it — "unidentified developer" / "damaged". This is not a theoretical caveat: `spctl -a -t exec -vv "build/Claude Switcher.app"` currently reports `rejected` for the ad-hoc build in this repo. That is expected and correct, and it is why [Install](#install) tells you to build it yourself.
+**An ad-hoc build runs only on the machine that built it.** On any other Mac, Gatekeeper rejects it — "unidentified developer" / "damaged". This is not theoretical: `spctl -a -t exec` reports `rejected` for an ad-hoc bundle, and `source=Unnotarized Developer ID` for one that is signed but not yet notarized. Only a notarized, stapled build reports:
+
+```
+Claude Switcher.app: accepted
+source=Notarized Developer ID
+origin=Developer ID Application: …
+```
 
 To ship a build to other people you need an Apple Developer Program membership and a Developer ID Application certificate, then:
 
@@ -298,13 +304,22 @@ xcrun notarytool store-credentials claude-switcher \
     --password <app-specific-password>
 ```
 
-and run with `NOTARY_PROFILE=claude-switcher` (the default), or pass `APPLE_ID` / `TEAM_ID` / `APP_PASSWORD` in the environment. The script zips the app with `ditto --keepParent`, submits it and waits, staples the ticket, validates it, re-zips the stapled app, and prints a final Gatekeeper assessment. It refuses up front if the bundle is ad-hoc signed, rather than failing after a slow upload — Apple will not notarize an ad-hoc signature.
+and run with `NOTARY_PROFILE=claude-switcher` (the default), or pass `APPLE_ID` / `TEAM_ID` / `APP_PASSWORD` in the environment.
+
+Preferred, and how the releases here are built — an **App Store Connect API key**, which needs no app-specific password, so no secret is typed or pasted anywhere:
+
+```bash
+ASC_KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_XXXXXXXXXX.p8 \
+ASC_KEY_ID=XXXXXXXXXX \
+ASC_ISSUER_ID=<issuer-uuid> \
+make notarize
+``` The script zips the app with `ditto --keepParent`, submits it and waits, staples the ticket, validates it, re-zips the stapled app, and prints a final Gatekeeper assessment. It refuses up front if the bundle is ad-hoc signed, rather than failing after a slow upload — Apple will not notarize an ad-hoc signature.
 
 `make dist` produces `build/Claude Switcher.zip`, and warns on stdout if what it just zipped is ad-hoc signed.
 
 The hardened runtime (`--options runtime`) and a secure timestamp (`--timestamp`) are applied **only** for real identities, because notarization requires both and an ad-hoc signature supports neither.
 
-> This repository ships nothing signed or notarized. The app is ad-hoc signed today; treat any prebuilt binary you did not build yourself with suspicion.
+> Releases are signed with a Developer ID Application certificate, notarized by Apple, and stapled — a downloaded copy opens with no Gatekeeper prompt, verified offline against the stapled ticket. A build you make yourself without a certificate is ad-hoc signed and will only run on the machine that built it.
 
 ### Automated releases
 

@@ -6,12 +6,15 @@
 #   1. The app is signed with a "Developer ID Application" identity AND the
 #      hardened runtime. `make bundle` does this automatically when such an
 #      identity is in your keychain. An ad-hoc signature CANNOT be notarized.
-#   2. notarytool credentials. Either store a profile once:
-#          xcrun notarytool store-credentials claude-switcher \
-#              --apple-id you@example.com --team-id TEAMID \
-#              --password <app-specific-password>
-#      and run this with NOTARY_PROFILE=claude-switcher (the default), or pass
-#      APPLE_ID / TEAM_ID / APP_PASSWORD in the environment.
+#   2. notarytool credentials, in any one of three forms:
+#      a. An App Store Connect API key (preferred - no password changes hands):
+#             ASC_KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_XXXX.p8 \
+#             ASC_KEY_ID=XXXX ASC_ISSUER_ID=<uuid> scripts/notarize.sh
+#      b. A stored keychain profile:
+#             xcrun notarytool store-credentials claude-switcher \
+#                 --apple-id you@example.com --team-id TEAMID
+#         then run with NOTARY_PROFILE=claude-switcher (the default).
+#      c. APPLE_ID / TEAM_ID / APP_PASSWORD in the environment.
 #
 # Why it matters: without notarization, macOS Gatekeeper blocks the app on every
 # Mac except the one that built it.
@@ -44,7 +47,13 @@ rm -f "$ZIP"
 /usr/bin/ditto -c -k --keepParent "$APP_DIR" "$ZIP"
 
 echo "==> Submitting to Apple (this can take a few minutes)"
-if [[ -n "${APPLE_ID:-}" && -n "${TEAM_ID:-}" && -n "${APP_PASSWORD:-}" ]]; then
+# Prefer an API key: it needs no app-specific password, so no secret has to be
+# typed, pasted or stored in the clear.
+if [[ -n "${ASC_KEY_PATH:-}" && -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
+  xcrun notarytool submit "$ZIP" \
+    --key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+    --wait
+elif [[ -n "${APPLE_ID:-}" && -n "${TEAM_ID:-}" && -n "${APP_PASSWORD:-}" ]]; then
   xcrun notarytool submit "$ZIP" \
     --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" \
     --wait
