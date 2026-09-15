@@ -11,7 +11,7 @@ APP_BUNDLE := build/$(APP_NAME).app
 INSTALL_DIR := /Applications
 
 .DEFAULT_GOAL := build
-.PHONY: build test icon bundle install notarize dist clean dry-run
+.PHONY: build test icon bundle install notarize dmg notarize-dmg release-artifacts dist clean dry-run
 
 build:
 	swift build -c release
@@ -38,6 +38,20 @@ install: bundle
 # signature (see scripts/bundle.sh) and notarytool credentials.
 notarize:
 	scripts/notarize.sh
+
+# A drag-to-Applications disk image, signed with the same identity as the app.
+dmg: bundle
+	scripts/dmg.sh
+
+notarize-dmg:
+	TARGET=dmg scripts/notarize.sh
+
+# The full path to a shippable download: sign, notarize + staple the app, wrap it
+# in a disk image, then notarize + staple the image itself.
+release-artifacts: bundle
+	$(MAKE) notarize
+	scripts/dmg.sh
+	$(MAKE) notarize-dmg
 
 # A zip other people can actually download. Notarize first if you are shipping it.
 dist: bundle

@@ -62,18 +62,21 @@ jobs:
         if: steps.gate.outputs.signed == 'true'
         run: VERSION="${GITHUB_REF_NAME#v}" make bundle
 
-      - name: Notarize and staple
+      - name: Notarize the app, build the disk image, notarize that too
         if: steps.gate.outputs.signed == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: make notarize
+        run: |
+          make notarize
+          scripts/dmg.sh
+          TARGET=dmg scripts/notarize.sh
 
       - name: Publish the release
         if: steps.gate.outputs.signed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "build/Claude Switcher.zip" \
+          gh release create "$GITHUB_REF_NAME" "build/Claude Switcher.dmg" \
             --title "$GITHUB_REF_NAME" --generate-notes

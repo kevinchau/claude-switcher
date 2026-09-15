@@ -12,9 +12,7 @@
 ![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-### [⬇︎ Download for macOS](https://github.com/kevinchau/claude-switcher/releases/latest/download/Claude.Switcher.zip)
-
-Signed, notarized and stapled — it opens on a double-click, no Gatekeeper prompt.
+### [⬇︎ Download for macOS](https://github.com/kevinchau/claude-switcher/releases/latest/download/Claude.Switcher.dmg)
 
 </div>
 
@@ -102,28 +100,9 @@ If any running instance matches no configured profile, a trailing `Running insta
 
 ### Download the app
 
-**[⬇︎ Claude Switcher.zip](https://github.com/kevinchau/claude-switcher/releases/latest/download/Claude.Switcher.zip)** — unzip, drag to `/Applications`, open.
+**[⬇︎ Claude Switcher.dmg](https://github.com/kevinchau/claude-switcher/releases/latest/download/Claude.Switcher.dmg)** — open it and drag Claude Switcher to Applications.
 
-The released build is signed with a Developer ID Application certificate, notarized by Apple, and has the ticket stapled, so it opens normally with no right-click-to-open dance. Verified on the published artifact after re-downloading it with the quarantine flag a browser applies:
-
-```
-Claude Switcher.app: accepted
-source=Notarized Developer ID
-origin=Developer ID Application: Likely Labs LTD (FTHBLX7S63)
-```
-
-The stapled ticket validates offline, so it works on a machine that has never talked to Apple's notary service. Check any copy yourself:
-
-```sh
-spctl -a -t exec -vv "/Applications/Claude Switcher.app"
-codesign --verify --strict --deep "/Applications/Claude Switcher.app"
-xcrun stapler validate "/Applications/Claude Switcher.app"
-```
-
-| | |
-| --- | --- |
-| macOS | 14 or later |
-| Claude Desktop | Installed (default `/Applications/Claude.app`, or pick it from the menu) |
+Signed and notarized, so it just opens. Needs macOS 14+ and Claude Desktop.
 
 ### Or build it from source
 
