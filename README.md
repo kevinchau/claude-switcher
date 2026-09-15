@@ -7,9 +7,14 @@
 **Several Anthropic accounts on one Mac — and one shared `~/.claude`.**
 
 [![CI](https://github.com/kevinchau/claude-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/kevinchau/claude-switcher/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kevinchau/claude-switcher?label=release)](https://github.com/kevinchau/claude-switcher/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
 ![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
+
+### [⬇︎ Download for macOS](https://github.com/kevinchau/claude-switcher/releases/latest/download/Claude.Switcher.zip)
+
+Signed, notarized and stapled — it opens on a double-click, no Gatekeeper prompt.
 
 </div>
 
@@ -95,23 +100,46 @@ If any running instance matches no configured profile, a trailing `Running insta
 
 ## Install
 
+### Download the app
+
+**[⬇︎ Claude Switcher.zip](https://github.com/kevinchau/claude-switcher/releases/latest/download/Claude.Switcher.zip)** — unzip, drag to `/Applications`, open.
+
+The released build is signed with a Developer ID Application certificate, notarized by Apple, and has the ticket stapled, so it opens normally with no right-click-to-open dance. Verified on the published artifact after re-downloading it with the quarantine flag a browser applies:
+
+```
+Claude Switcher.app: accepted
+source=Notarized Developer ID
+origin=Developer ID Application: Likely Labs LTD (FTHBLX7S63)
+```
+
+The stapled ticket validates offline, so it works on a machine that has never talked to Apple's notary service. Check any copy yourself:
+
+```sh
+spctl -a -t exec -vv "/Applications/Claude Switcher.app"
+codesign --verify --strict --deep "/Applications/Claude Switcher.app"
+xcrun stapler validate "/Applications/Claude Switcher.app"
+```
+
+| | |
+| --- | --- |
+| macOS | 14 or later |
+| Claude Desktop | Installed (default `/Applications/Claude.app`, or pick it from the menu) |
+
+### Or build it from source
+
 ```sh
 git clone https://github.com/kevinchau/claude-switcher.git
 cd claude-switcher
 make install
 ```
 
-`make install` builds the release binary, assembles `build/Claude Switcher.app`, **ad-hoc signs** it, and copies it to `/Applications`. That is the only thing the build system touches outside the working tree — it never modifies the `Claude.app` bundle, and it never writes `~/.config/claude-switcher/config.json` (only the running app does that). Launch at Login is *not* enabled by installing; it is a menu-bar toggle.
+`make install` builds the release binary, assembles `build/Claude Switcher.app`, signs it, and copies it to `/Applications`. That is the only thing the build system touches outside the working tree — it never modifies the `Claude.app` bundle, and it never writes `~/.config/claude-switcher/config.json` (only the running app does that). Launch at Login is *not* enabled by installing; it is a menu-bar toggle.
 
-Building from source is the install path on purpose: an ad-hoc signed app only runs on the machine that built it. See [Signing and distribution](#signing-and-distribution).
-
-**Requirements**
+A source build is signed with your own Developer ID certificate if you have one, and **ad-hoc** otherwise — an ad-hoc app runs only on the machine that built it, which is fine when that machine is yours. See [Signing and distribution](#signing-and-distribution).
 
 | | |
 | --- | --- |
-| macOS | 14 or later |
 | Toolchain | Swift 6 (Xcode 16+); developed against Swift 6.3.3 |
-| Claude Desktop | Installed (default `/Applications/Claude.app`, or pick it from the menu) |
 | Dependencies | None. AppKit and Foundation only, no Xcode project. |
 
 ---
@@ -313,7 +341,9 @@ ASC_KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_XXXXXXXXXX.p8 \
 ASC_KEY_ID=XXXXXXXXXX \
 ASC_ISSUER_ID=<issuer-uuid> \
 make notarize
-``` The script zips the app with `ditto --keepParent`, submits it and waits, staples the ticket, validates it, re-zips the stapled app, and prints a final Gatekeeper assessment. It refuses up front if the bundle is ad-hoc signed, rather than failing after a slow upload — Apple will not notarize an ad-hoc signature.
+```
+
+The script zips the app with `ditto --keepParent`, submits it and waits, staples the ticket, validates it, re-zips the stapled app, and prints a final Gatekeeper assessment. It refuses up front if the bundle is ad-hoc signed, rather than failing after a slow upload — Apple will not notarize an ad-hoc signature.
 
 `make dist` produces `build/Claude Switcher.zip`, and warns on stdout if what it just zipped is ad-hoc signed.
 
