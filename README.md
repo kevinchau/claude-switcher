@@ -306,6 +306,22 @@ The hardened runtime (`--options runtime`) and a secure timestamp (`--timestamp`
 
 > This repository ships nothing signed or notarized. The app is ad-hoc signed today; treat any prebuilt binary you did not build yourself with suspicion.
 
+### Automated releases
+
+`.github/workflows/release.yml` builds, signs, notarizes, staples and publishes a release when you push a version tag (`v0.1.0`). It is gated on the signing secrets being present, so it no-ops safely until they are configured:
+
+| Secret | What it is |
+| --- | --- |
+| `MACOS_CERT_P12` | base64 of your exported **Developer ID Application** `.p12` (`base64 -i cert.p12 \| pbcopy`) |
+| `MACOS_CERT_PASSWORD` | the password set when exporting the `.p12` |
+| `APPLE_ID` | Apple ID email |
+| `APPLE_TEAM_ID` | 10-character team id |
+| `APPLE_APP_PASSWORD` | app-specific password from [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security |
+
+The certificate is imported into a throwaway keychain that dies with the runner, and the `.p12` is deleted immediately after import.
+
+**Getting the certificate.** An Apple Developer Program membership does *not* give you one automatically, and an iOS project cannot supply it — iOS apps sign with `Apple Development` / `Apple Distribution`, which are a different certificate type. Create it once in Xcode → **Settings → Accounts → (your team) → Manage Certificates → + → Developer ID Application**, then export it from Keychain Access as a `.p12`.
+
 ---
 
 ## Build and develop

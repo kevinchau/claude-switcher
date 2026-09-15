@@ -1,0 +1,79 @@
+name: Release
+
+# Publishes a signed + notarized build when you push a version tag (e.g. v0.1.0).
+#
+# Requires these repository secrets. Until they exist the job is skipped, so the
+# workflow is safe to merge before the certificate is ready:
+#
+#   MACOS_CERT_P12        base64 of the exported "Developer ID Application" .p12
+#                           base64 -i cert.p12 | pbcopy
+#   MACOS_CERT_PASSWORD   the password you set when exporting the .p12
+#   APPLE_ID              your Apple ID email
+#   APPLE_TEAM_ID         your 10-character team id
+#   APPLE_APP_PASSWORD    an app-specific password (appleid.apple.com -> Sign-In and Security)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check signing secrets are present
+        id: gate
+        env:
+          CERT: ${{ secrets.MACOS_CERT_P12 }}
+        run: |
+          if [[ -n "$CERT" ]]; then echo "signed=true" >> "$GITHUB_OUTPUT"
+          else echo "signed=false" >> "$GITHUB_OUTPUT"
+               echo "::warning::Signing secrets absent - skipping the signed release."
+          fi
+
+      - name: Test
+        run: swift test
+
+      - name: Import Developer ID certificate
+        if: steps.gate.outputs.signed == 'true'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          # A throwaway keychain keeps the cert out of the default one and is
+          # discarded with the runner.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo -n "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Bundle (Developer ID signed, hardened runtime)
+        if: steps.gate.outputs.signed == 'true'
+        run: VERSION="${GITHUB_REF_NAME#v}" make bundle
+
+      - name: Notarize and staple
+        if: steps.gate.outputs.signed == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: make notarize
+
+      - name: Publish the release
+        if: steps.gate.outputs.signed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "build/Claude Switcher.zip" \
+            --title "$GITHUB_REF_NAME" --generate-notes
