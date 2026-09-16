@@ -21,13 +21,18 @@ When one account hits its usage limit, the day stops. The usual workaround — a
 Claude Switcher is a menu-bar app that runs multiple Anthropic accounts side by side on one Mac, in Claude Desktop (chat **and** the Code tab) and in the terminal `claude` CLI. Every account shares **one `~/.claude`**, so your memories, skills, subagents, plugins, settings and project/session history follow you to all of them. Hitting a limit costs you a menu click, not your context.
 
 <p align="center">
-  <img src="assets/two-claudes.jpg" height="300" alt="Office Space meme: &quot;Two Claudes, at the same time&quot;">
-  <img src="assets/opus-vs-fable.jpg" height="300" alt="Two guys on a bus meme: &quot;me talking to Opus&quot; on the rock-wall side, &quot;me talking to Fable&quot; on the scenic side">
+  <img src="assets/two-claudes.jpg" width="480" alt="Office Space meme: &quot;Two Claudes, at the same time&quot;">
 </p>
 
 ---
 
 ## Why this exists
+
+Burn through your Fable quota and the rest of the day turns into pulling hairs: same questions, a lot more coaxing. A second account puts you back on Fable in one click.
+
+<p align="center">
+  <img src="assets/opus-vs-fable.jpg" width="400" alt="Two guys on a bus meme: &quot;me talking to Opus&quot; on the rock-wall side, &quot;me talking to Fable&quot; on the scenic side">
+</p>
 
 The advice you will find online is to point `CLAUDE_CONFIG_DIR` at a second directory per account:
 
