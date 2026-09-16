@@ -20,6 +20,10 @@ When one account hits its usage limit, the day stops. The usual workaround — a
 
 Claude Switcher is a menu-bar app that runs multiple Anthropic accounts side by side on one Mac, in Claude Desktop (chat **and** the Code tab) and in the terminal `claude` CLI. Every account shares **one `~/.claude`**, so your memories, skills, subagents, plugins, settings and project/session history follow you to all of them. Hitting a limit costs you a menu click, not your context.
 
+<p align="center">
+  <img src="assets/two-claudes.jpg" width="480" alt="Office Space meme: &quot;Two Claudes, at the same time&quot;">
+</p>
+
 ---
 
 ## Why this exists
@@ -38,8 +42,14 @@ Per [`RR()`](#21-the-config-dir-is-independent-of-the-electron-profile), that wo
 
 ## What it looks like
 
-The whole interface is one menu. Below is its real structure, read from the running
-app's accessibility tree — one row per account, a checkmark on the ones currently up:
+The whole interface is one menu — here with two accounts running at once:
+
+<p align="center">
+  <img src="assets/menu.png" width="660" alt="The Claude Switcher menu with two profiles, Personal and Christy, both running">
+</p>
+
+Its structure as text, read from the running app's accessibility tree — one row per
+account, a checkmark on the ones currently up:
 
 ```
 Running: Personal
