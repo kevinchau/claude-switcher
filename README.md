@@ -21,7 +21,8 @@ When one account hits its usage limit, the day stops. The usual workaround — a
 Claude Switcher is a menu-bar app that runs multiple Anthropic accounts side by side on one Mac, in Claude Desktop (chat **and** the Code tab) and in the terminal `claude` CLI. Every account shares **one `~/.claude`**, so your memories, skills, subagents, plugins, settings and project/session history follow you to all of them. Hitting a limit costs you a menu click, not your context.
 
 <p align="center">
-  <img src="assets/two-claudes.jpg" width="480" alt="Office Space meme: &quot;Two Claudes, at the same time&quot;">
+  <img src="assets/two-claudes.jpg" height="300" alt="Office Space meme: &quot;Two Claudes, at the same time&quot;">
+  <img src="assets/opus-vs-fable.jpg" height="300" alt="Two guys on a bus meme: &quot;me talking to Opus&quot; on the rock-wall side, &quot;me talking to Fable&quot; on the scenic side">
 </p>
 
 ---
