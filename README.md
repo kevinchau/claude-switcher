@@ -28,7 +28,7 @@ Claude Switcher is a menu-bar app that runs multiple Anthropic accounts side by 
 
 ## Why this exists
 
-Burn through your Fable quota and the rest of the day turns into pulling hairs: same questions, a lot more coaxing. A second account puts you back on Fable in one click.
+Burn through your Fable quota and the rest of the week turns into pulling hairs: same questions, a lot more coaxing. A second account puts you back on Fable in one click.
 
 <p align="center">
   <img src="assets/opus-vs-fable.jpg" width="400" alt="Two guys on a bus meme: &quot;me talking to Opus&quot; on the rock-wall side, &quot;me talking to Fable&quot; on the scenic side">
