@@ -77,6 +77,14 @@ Launch at Login
 Quit Claude Switcher
 ```
 
+When Claude has downloaded an update it cannot install — see [§2.9](#29-updates-need-every-instance-to-quit) — two more lines appear under the header:
+
+```
+Running: Personal, Work
+Claude 2.110.1 is downloaded but can't install until every profile quits.
+Quit All & Install Update…
+```
+
 And `claude-switcher --dry-run`, which prints the resolved launch plan and exits without launching or creating anything. Verbatim output from a run with Claude up on the default profile and a second profile `Work` configured, with only the home directory rewritten to `/Users/me` (and the Keychain suffix recomputed to match, since it is `sha256` of that exact string — see [§2.7](#27-keychain-service-name-derivation)):
 
 ```
@@ -171,6 +179,7 @@ The first run for a new credential dir will be logged out; sign in interactively
 The menu is rebuilt on every open so running state is fresh.
 
 - A disabled header: `Running: Personal, Work` — or `Claude is not running`.
+- **Quit All & Install Update…**, under a disabled line naming the version — shown only while Claude has an update downloaded, its installer is alive and waiting, and at least one instance is running (see [§2.9](#29-updates-need-every-instance-to-quit)). It confirms first, naming the profiles it will quit and reopen and any unrecognized instances it will quit and *not* reopen. It then asks every instance to quit (the same as ⌘Q — never forced), waits for Claude's own installer to finish, and reopens the profiles that were running; if an instance will not quit, nothing is reopened and it says which profiles are closed. While it runs, a progress line replaces the offer. **This is the only thing in the app that ever quits Claude, and it never happens on its own.**
 - One item per profile: the label, a checkmark when an instance for that profile is running, and a badge hint about the terminal CLI. The hint has **three** states, from `MenuBuilder.hintText`:
 
   | probe result | hint |
@@ -184,11 +193,13 @@ The menu is rebuilt on every open so running state is fresh.
 - **Add Profile…**, and **Remove Profile** (disabled for the default profile and for the active profile; confirms first; **never deletes the profile's data directories**, and says so in the dialog).
 - **Choose Claude.app…** — an `NSOpenPanel`, offered when the configured path is missing or on request.
 - **Reveal ~/.claude in Finder**.
-- **Diagnostics** — a selectable-text alert with: the config path; the resolved `Claude.app` path and its `CFBundleIdentifier`; the shared config dir (`~/.claude`) and confirmation that `CLAUDE_CONFIG_DIR` is unset; each profile with its normalized directories, derived Keychain service name and running pid; and the `claude` CLI version for both the `PATH` binary and the app-managed sidecar if present.
+- **Diagnostics** — a selectable-text alert with: the config path; the resolved `Claude.app` path, its `CFBundleIdentifier` and version, any staged update and whether Claude's installer is running; the shared config dir (`~/.claude`) and confirmation that `CLAUDE_CONFIG_DIR` is unset; each profile with its normalized directories, derived Keychain service name and running pid; and the `claude` CLI version for both the `PATH` binary and the app-managed sidecar if present.
 - **Launch at Login** — a checkbox bound to `SMAppService.mainApp`, reflecting `.status`.
 - **Quit**.
 
 Launches are serialized, but only the items that could start a second one are gated on the in-flight flag: **the profile rows, Add Profile… and the Remove Profile submenu** go disabled while a launch is in flight and re-enable on completion (a 30-second watchdog re-enables them if a completion handler never arrives). **Copy terminal command, Choose Claude.app…, Reveal ~/.claude, Diagnostics…, Launch at Login and Quit stay enabled throughout.** The profile rows additionally require the configured `Claude.app` to exist.
+
+An update install holds the same flag from confirmation until the last profile is back, and additionally disables **Choose Claude.app…** and **Quit** — quitting the switcher mid-install would leave every profile closed with nothing to reopen it.
 
 </details>
 
@@ -238,7 +249,7 @@ This is the mechanism the whole tool is built on. **`claude-switcher` therefore 
 
 ### 2.3 Instances run concurrently
 
-There is **no `requestSingleInstanceLock` anywhere in the app**. Multiple instances with different `--user-data-dir` values run side by side. Switching accounts is therefore *launching or focusing another instance* — there is no quitting, no logging out, no waiting.
+There is **no `requestSingleInstanceLock` anywhere in the app**. Multiple instances with different `--user-data-dir` values run side by side. Switching accounts is therefore *launching or focusing another instance* — there is no quitting, no logging out, no waiting. (Running side by side has one cost, and it is the only time anything needs to quit: Claude's updater — [§2.9](#29-updates-need-every-instance-to-quit).)
 
 ### 2.4 The Code tab does not read the Keychain
 
@@ -297,6 +308,26 @@ The hash covers **exactly the string handed to the CLI**, so `claude-switcher` n
 - **Bundle identifier:** read `CFBundleIdentifier` from the configured app's `Info.plist`. Never hardcoded.
 - **Terminal:** the tool does not run the CLI for you. It copies the right command to the pasteboard and reports sign-in state.
 - **Credentials:** the tool performs **existence checks only**, via `security find-generic-password -s "<service>" -a "$USER"`. It never passes `-w`, and never reads, writes, copies, migrates or deletes a Keychain secret. Any failure degrades silently to the same answer as a genuine absence (see the hint table under [Usage](#usage)).
+
+### 2.9 Updates need every instance to quit
+
+Claude Desktop updates itself with Squirrel. When an update has downloaded, the app starts a helper, `ShipIt`, that notes every instance of the app running at that moment, waits until **all of them** have exited, and only then swaps the bundle. (Each running instance re-requests the install at its hourly update check, which restarts the helper with a fresh list.) Claude also updates "stealthily": after an idle timeout it quits itself (`beforeQuitForUpdate … going down for update` in `~/Library/Logs/Claude/main.log`), expecting the helper to install and bring it back.
+
+With one instance that works — observed end to end in about seven seconds. With two it cannot: the other profile never exits, so the helper never starts installing, and **the profile that quit itself stays closed**. Reopening it by hand only restarts the cycle — it re-requests the install and quits again the next time it goes idle. The tell-tale is `~/Library/Caches/<bundle id>.ShipIt/ShipIt_stderr.log` filling with `Detected this as an install request` lines that are never followed by `Beginning installation`.
+
+The switcher cannot change how Claude's updater works, so it does the two things it can:
+
+- **It notices.** On every menu open it reads the helper's request file (`ShipItState.plist` — JSON, despite the name), the `Info.plist` of the downloaded bundle it points at and of the installed app, and scans process names for a live `ShipIt` whose job label is `<bundle id>.ShipIt`. An update counts as blocked only when the request names the configured app, the downloaded bundle still exists inside the helper's cache directory with a different version, *and* a helper is alive to install it — the request file outlives the install it describes, so its presence alone means nothing. Versions are read straight from the plist file, never through `Bundle`, which caches per path and would not notice the app being replaced.
+- **It offers the way through: Quit All & Install Update….** After you confirm, it asks each running instance to quit with `NSRunningApplication.terminate()` (the same request as ⌘Q), waits until none is left, waits for the helper to exit, and then reopens the profiles that were running — named profiles first, the default profile last, skipping any that are already back, because the helper sometimes reopens the default profile itself.
+
+The sequence is deliberately timid:
+
+- It quits only the instances that were running when you confirmed, and quits nothing if that set has changed.
+- It never escalates: no `forceTerminate()`, no signals. An instance showing a dialog of its own just runs out the one-minute clock — and then **nothing is reopened**. The helper only waits for the instances it listed when it started, so it may begin the moment the last of *those* quits; a profile reopened now could be running from a bundle that is about to be moved away. The alert names the profiles left closed.
+- It launches nothing until the helper has *stayed* gone for three seconds. One absent poll proves nothing: a failed install attempt exits and launchd restarts the helper within about two seconds, and the restarted one installs immediately. If the helper is still going after three minutes it reopens nothing and says so. The single exception: once the new version is on disk, only the helper's own relaunch step remains, so after a 15-second grace the profiles are reopened even if it lingers.
+- It will not start a profile while an instance it cannot identify is running, since that could be the very profile it is about to start — two processes on one profile directory can corrupt that login.
+
+Everything here is read-only apart from the quit request itself: nothing under the helper's cache directory is written, moved or deleted, the helper is never started by this tool, and the `Claude.app` bundle is only ever replaced by Claude's own installer.
 
 ---
 
@@ -379,7 +410,7 @@ make clean      # rm -rf .build build
 make dry-run    # swift run -c release claude-switcher --dry-run
 ```
 
-`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.1.0`. No Xcode project is involved.
+`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.2.0`. No Xcode project is involved.
 
 ### Layout
 
@@ -387,7 +418,7 @@ A SwiftPM package (`swift-tools-version:6.0`, every target compiled with `.swift
 
 | Target | Path | What it is |
 | --- | --- | --- |
-| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning` |
+| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning`, `UpdateProbe`, `UpdateInstaller` |
 | `claude-switcher` (executable) | `Sources/ClaudeSwitcher` | Thin AppKit shell: `main.swift`, `AppDelegate`, `MenuBuilder`, `Diagnostics` |
 | `ClaudeSwitcherTests` | `Tests/ClaudeSwitcherTests` | Tests, importing `ClaudeSwitcherCore` |
 
@@ -395,11 +426,11 @@ The split is deliberate: a test target cannot import an executable target cleanl
 
 ### Tests
 
-`make test` runs **90 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, and launch planning.
+`make test` runs **142 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
 
 ### `--dry-run` and `--help`
 
-`claude-switcher --dry-run` prints the resolved launch plan for every profile and exits `0` **without creating a status item, creating any directory, or launching anything**. It does enumerate running processes, read-only, so the plan can say what is already up — see the [output above](#what-it-looks-like). This is the fastest way to confirm what the tool *would* do before letting it do it.
+`claude-switcher --dry-run` prints the resolved launch plan for every profile and exits `0` **without creating a status item, creating any directory, or launching anything**. It does enumerate running processes, read-only, so the plan can say what is already up — see the [output above](#what-it-looks-like) — and, only when Claude has an update downloaded but not installed, adds an `Update:` line saying what is in its way. This is the fastest way to confirm what the tool *would* do before letting it do it.
 
 `claude-switcher --help` (or `-h`) prints usage — the two modes, the config path, how profiles differ, and what stays shared — and exits `0`. The flag scan is a plain `contains` over the arguments, and `--help`/`-h` is checked before `--dry-run`.
 
@@ -473,13 +504,14 @@ Checked again at **load** time (`Config.init(from:)`), since the file is hand-ed
 - **Chat history is per-account and cannot be shared.** It lives server-side on the Anthropic account. Cowork/remote sessions and usage limits are likewise per-account. Only the local `~/.claude` state is shared.
 - **The tool never reads, writes or migrates credentials.** Each account is signed in by you, interactively, once. Keychain interaction is an existence check with `security find-generic-password -s <service> -a "$USER"` and never `-w`; any failure is indistinguishable from a genuine absence and is reported the same way (see the hint table under [Usage](#usage)). `CLAUDE_CODE_OAUTH_TOKEN` is never set by this tool.
 - **The "terminal: signed in" hint is about the CLI only.** It says nothing about whether the Desktop profile is logged in.
+- **Claude cannot update itself while two profiles are open.** Its installer waits for every instance to quit, so a profile that quits itself to be updated stays closed until the rest do too ([§2.9](#29-updates-need-every-instance-to-quit)). The menu says when this is happening and offers **Quit All & Install Update…**; using it interrupts whatever Claude is doing in every profile, like any quit. Detection reads Squirrel's internal files, so a Claude update may break it — in which case the menu simply stops mentioning updates, and quitting every profile by hand still works.
 - **Removing a profile never deletes its data.** The Electron profile dir and credential dir are left on disk; delete them yourself if you want them gone.
 
 ---
 
 ## Not affiliated with Anthropic
 
-This is an independent, unofficial project. It is not affiliated with, endorsed by, or supported by Anthropic. "Claude" and "Anthropic" are trademarks of Anthropic, PBC. The tool never modifies, copies or duplicates the `Claude.app` bundle — it only reads its `Info.plist` and launches it with a standard Electron flag.
+This is an independent, unofficial project. It is not affiliated with, endorsed by, or supported by Anthropic. "Claude" and "Anthropic" are trademarks of Anthropic, PBC. The tool never modifies, copies or duplicates the `Claude.app` bundle — it only reads its `Info.plist`, launches it with a standard Electron flag and, solely when you ask it to, asks it to quit so that Claude's own updater can run.
 
 **It never handles your credentials.** You sign in to each account yourself, interactively, in the app or the CLI. Keychain access is an existence check only — `security find-generic-password -s "<service>" -a "$USER"`, **never** with `-w` — so no secret is ever read, written, copied, migrated or deleted. No `CLAUDE_*` variable is ever injected into a launched app's environment, and `CLAUDE_CODE_OAUTH_TOKEN` is never set.
 
@@ -566,13 +598,13 @@ public enum ProcessArgs {
 }
 
 // ── Sources/ClaudeSwitcherCore/InstanceManager.swift ─────────────────────────
-public enum InstanceProfile: Equatable {
+public enum InstanceProfile: Equatable, Sendable {
     case defaultProfile          // no --user-data-dir: the app's own profile
     case directory(String)       // --user-data-dir=<normalized>
     case unknown                 // argv unreadable; matches NO profile, ever
 }
 
-public struct RunningInstance: Equatable {
+public struct RunningInstance: Equatable, Sendable {
     public let pid: pid_t
     public let profile: InstanceProfile
     public init(pid: pid_t, profile: InstanceProfile)
@@ -592,6 +624,10 @@ public enum InstanceManager {
     public static func profileBinding(fromArguments arguments: [String]?) -> InstanceProfile
     public static func binding(for profile: Profile) -> InstanceProfile
     public static func activate(pid: pid_t, expecting bundleID: String? = nil) -> Bool
+    // The ONLY call that ever ends a Claude process. Graceful; bundleID is non-optional so
+    // the pid-reuse guard cannot be skipped. Returns "request sent", not "has quit".
+    @discardableResult
+    public static func terminate(pid: pid_t, expecting bundleID: String) -> Bool
     public static func launch(profile: Profile, appPath: String,
                               completion: @escaping @Sendable (Result<pid_t, Error>) -> Void)
 }
@@ -607,6 +643,69 @@ public enum LaunchPlanning {
     public static func launchArguments(for profile: Profile) -> [String]   // [] for the default profile
     public static func terminalCommand(for profile: Profile) -> String     // "claude" for the default slot
     public static func shellQuoted(_ value: String) -> String
+}
+
+// ── Sources/ClaudeSwitcherCore/StagedUpdate.swift ────────────────────────────
+public struct AppVersion: Equatable, Sendable, CustomStringConvertible {
+    public let short: String     // CFBundleShortVersionString
+    public let build: String     // CFBundleVersion
+}
+
+public struct StagedUpdate: Equatable, Sendable {
+    public let installed: AppVersion
+    public let staged: AppVersion
+    public let updateBundlePath: String
+}
+
+public struct UpdateStatus: Equatable, Sendable {
+    public let installed: AppVersion?
+    public let staged: StagedUpdate?
+    public let updaterIsRunning: Bool
+    public var blocked: StagedUpdate? { get }   // staged, but only while an installer is alive
+}
+
+public enum UpdateProbe {                        // read-only, every member
+    public static func shipItDirectory(bundleID: String, home: String = NSHomeDirectory()) -> String
+    public static func version(ofBundleAt path: String) -> AppVersion?   // plist file, never Bundle
+    public static func stagedUpdate(appPath: String, bundleID: String,
+                                    shipItDirectory: String? = nil) -> StagedUpdate?
+    public static func status(appPath: String) -> UpdateStatus
+    public static func isUpdaterCommandLine(_ arguments: [String]?, bundleID: String) -> Bool
+    public static func isUpdaterRunning(bundleID: String) -> Bool
+}
+
+// ── Sources/ClaudeSwitcherCore/UpdateInstaller.swift ─────────────────────────
+public struct UpdatePlan: Equatable, Sendable {
+    public let quit: [RunningInstance]     // every instance, recognised or not
+    public let reopen: [Profile]           // named profiles first, the default profile last
+    public let strays: [RunningInstance]   // quit, but no profile to reopen them from
+}
+
+public enum UpdateInstaller {
+    public static func plan(running: [RunningInstance], profiles: [Profile]) -> UpdatePlan
+
+    public struct Environment: Sendable {  // every effect, injected; tests use a fake
+        public var runningInstances: @MainActor () -> [RunningInstance]
+        public var terminate: @MainActor (pid_t) -> Bool
+        public var installedVersion: @MainActor () -> AppVersion?
+        public var updaterIsRunning: @MainActor () -> Bool
+        public var launch: @MainActor (Profile) -> Void
+        public var sleep: @MainActor (Duration) async -> Void
+        public static func live(appPath: String, bundleID: String) -> Environment
+    }
+
+    public struct Timing: Equatable, Sendable   // poll 0.5 s, quit 60 s, install 180 s, settle 3 s, …
+    public enum Phase: Equatable, Sendable { case quitting([RunningInstance]), installing, reopening(Profile) }
+    public enum Outcome: Equatable, Sendable {
+        case changedSinceConfirmation, quitRefused, updaterStuck
+        case quitTimedOut(stillRunning: [RunningInstance], closed: [Profile])   // nothing reopened
+        case installed(AppVersion, notReopened: [Profile])
+        case notInstalled(notReopened: [Profile])
+    }
+
+    @MainActor
+    public static func run(plan: UpdatePlan, environment: Environment, timing: Timing = Timing(),
+                           onPhase: @MainActor (Phase) -> Void = { _ in }) async -> Outcome
 }
 ```
 
@@ -627,5 +726,7 @@ Violating any of these is a critical defect:
 8. **Never** shell out to `/usr/bin/open` to launch the app.
 9. **Never** pass `CLAUDE_SECURESTORAGE_CONFIG_DIR` as an empty string; omit it entirely for the default profile.
 10. No external dependencies. AppKit and Foundation only.
+11. **Never** quit a Claude instance except from the explicit, confirmed **Quit All & Install Update…** action, and then only the pids in the snapshot the user confirmed. `NSRunningApplication.terminate()` only — **never** `forceTerminate()`, **never** a signal. `InstanceManager.terminate(pid:expecting:)` is the single call site.
+12. **Never** write, move or delete anything under `~/Library/Caches/<bundle id>.ShipIt`, never edit its request file, and never start `ShipIt`. The update is installed by Claude's installer or not at all.
 
 </details>

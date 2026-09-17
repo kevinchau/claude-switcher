@@ -8,6 +8,8 @@ import ClaudeSwitcherCore
 //     --user-data-dir=<dir> gives a separate login for BOTH chat and the Code tab.
 //   * Claude.app takes no single-instance lock, so several profiles run concurrently:
 //     switching is launching or focusing another instance, never quitting or logging out.
+//     (The one time Claude is asked to quit is the explicit, confirmed "Quit All & Install
+//     Update…" action — its installer cannot run while any instance is up.)
 //   * ~/.claude (projects, history, skills, agents, plugins, memory, settings, CLAUDE.md)
 //     is resolved as CLAUDE_CONFIG_DIR ?? ~/.claude, independently of --user-data-dir.
 //     This app NEVER sets or modifies CLAUDE_CONFIG_DIR: keeping ~/.claude shared across
@@ -55,7 +57,8 @@ private func runDryRun() -> Int32 {
     }
     // Read-only: enumerates running processes so the plan can say what is already up.
     let running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
-    print(Diagnostics.launchPlan(config: config, running: running))
+    let update = UpdateProbe.status(appPath: config.claudeAppPath)
+    print(Diagnostics.launchPlan(config: config, running: running, update: update))
     return 0
 }
 

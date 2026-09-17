@@ -26,6 +26,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isMenuOpen = false
     private var didWarnAboutMissingCLI = false
 
+    /// A downloaded Claude update whose installer is waiting on the running instances, as of
+    /// the last time the menu opened.
+    private var blockedUpdate: StagedUpdate?
+    /// Non-nil for the duration of "Quit All & Install Update…". `isBusy` is held throughout,
+    /// so no profile can be launched into the middle of it.
+    private var updateProgress: String?
+
     /// Alerts are serialized. A background probe can finish while the user is in the open
     /// panel or a confirmation sheet, and stacking modals on top of each other is a trap.
     private var isPresentingModal = false
@@ -40,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         revealSharedDirectory: #selector(revealSharedDirectory(_:)),
         showDiagnostics: #selector(showDiagnostics(_:)),
         toggleLaunchAtLogin: #selector(toggleLaunchAtLogin(_:)),
+        installUpdate: #selector(installUpdate(_:)),
         quit: #selector(quit(_:))
     )
 
@@ -78,6 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isMenuOpen = true
         reloadConfig()
         running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
+        // Read-only and quick: one small JSON file, two Info.plists, a process-name scan.
+        blockedUpdate = UpdateProbe.status(appPath: config.claudeAppPath).blocked
         refreshSignInStates()
         rebuild(menu)
     }
@@ -94,7 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             isBusy: isBusy,
             configError: configError,
             claudeAppExists: FileManager.default.fileExists(atPath: PathNormalizer.normalize(config.claudeAppPath)),
-            launchAtLogin: launchAtLoginState()
+            launchAtLogin: launchAtLoginState(),
+            blockedUpdate: blockedUpdate,
+            updateProgress: updateProgress
         )
         let built = MenuBuilder.build(input, target: self, actions: Self.actions)
         // An NSMenuItem belongs to one menu, so detach before re-parenting.
@@ -240,6 +252,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.addButton(withTitle: "Start Anyway")
             alert.addButton(withTitle: "Cancel")
             guard runModal(alert) == .alertFirstButtonReturn else { return }
+            // Main-actor work keeps running underneath a modal: an update install may have
+            // started while this one was up, and nothing may be launched into the middle of it.
+            guard !isBusy else { return }
         }
 
         isBusy = true
@@ -422,6 +437,156 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var suffix = 2
         while config.profile(id: "\(slug)-\(suffix)") != nil { suffix += 1 }
         return "\(slug)-\(suffix)"
+    }
+
+    // MARK: - Actions: blocked update
+
+    /// The only path by which this app ever asks Claude to quit: this menu item, then an
+    /// explicit confirmation. Nothing here runs on a timer or on its own initiative.
+    @objc private func installUpdate(_ sender: NSMenuItem) {
+        // The status menu still opens while an alert is up, so this can be reached from inside
+        // another modal — including its own confirmation.
+        guard !isBusy, updateProgress == nil, !isPresentingModal else { return }
+        let appPath = config.claudeAppPath
+
+        guard let bundleID = InstanceManager.bundleIdentifier(appPath: appPath),
+              let update = UpdateProbe.status(appPath: appPath).blocked else {
+            blockedUpdate = nil
+            presentAlert(
+                style: .informational,
+                title: "No update is waiting any more",
+                message: "Claude\u{2019}s installer is no longer waiting on a downloaded update, so there is nothing to make room for. Nothing was quit."
+            )
+            return
+        }
+
+        running = InstanceManager.runningInstances(appPath: appPath)
+        let plan = UpdateInstaller.plan(running: running, profiles: config.profiles)
+        guard !plan.quit.isEmpty else { return }
+
+        var details = [
+            "Claude\u{2019}s installer only runs once every Claude instance has quit. With \(plan.quit.count == 1 ? "a profile" : "\(plan.quit.count) instances") open it has been waiting \u{2014} and a profile that quits itself to be updated never comes back."
+        ]
+        if !plan.reopen.isEmpty {
+            details.append("Will quit, then reopen:  \(plan.reopen.map(\.label).joined(separator: ", "))")
+        }
+        if !plan.strays.isEmpty {
+            details.append("Will quit and NOT reopen:  \(plan.strays.count) unrecognized instance\(plan.strays.count == 1 ? "" : "s") (no profile to reopen \(plan.strays.count == 1 ? "it" : "them") from)")
+        }
+        details.append("Anything Claude is doing right now \u{2014} a response being written, a task running in the Code tab \u{2014} is interrupted, as with any quit.")
+        details.append("Claude Switcher only asks Claude to quit, the same as \u{2318}Q. The update itself is installed by Claude\u{2019}s own installer.")
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Quit every Claude profile to install Claude \(update.staged)?"
+        alert.informativeText = details.joined(separator: "\n\n")
+        alert.addButton(withTitle: "Quit All & Install")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+
+        guard runModal(alert) == .alertFirstButtonReturn else { return }
+        // Main-actor work keeps running underneath a modal; something may have started meanwhile.
+        guard !isBusy else { return }
+
+        isBusy = true
+        // Retire any launch watchdog still sleeping: it clears `isBusy` for its own generation.
+        launchGeneration &+= 1
+        setUpdateProgress("Installing update\u{2026}")
+
+        let environment = UpdateInstaller.Environment.live(appPath: appPath, bundleID: bundleID)
+        Task { @MainActor in
+            let outcome = await UpdateInstaller.run(plan: plan, environment: environment) { phase in
+                self.setUpdateProgress(self.progressText(for: phase, update: update))
+            }
+            self.updateDidFinish(outcome, update: update)
+        }
+    }
+
+    /// Rebuilds only when the text changes: the quitting phase reports on every poll, and a
+    /// menu must not be rebuilt twice a second underneath the user's cursor.
+    private func setUpdateProgress(_ text: String?) {
+        guard text != updateProgress else { return }
+        updateProgress = text
+        rebuildIfVisible()
+    }
+
+    private func progressText(for phase: UpdateInstaller.Phase, update: StagedUpdate) -> String {
+        switch phase {
+        case .quitting(let instances):
+            return "Installing update: waiting for \(describe(instances)) to quit\u{2026}"
+        case .installing:
+            return "Installing Claude \(update.staged)\u{2026}"
+        case .reopening(let profile):
+            return "Reopening \u{201C}\(profile.label)\u{201D}\u{2026}"
+        }
+    }
+
+    /// "Personal, Christy" where the instances map to profiles, a count otherwise.
+    private func describe(_ instances: [RunningInstance]) -> String {
+        let labels = config.profiles
+            .filter { ProfileMatching.isRunning($0, in: instances) }
+            .map(\.label)
+        let others = instances.count - labels.count
+        var parts = labels
+        if others > 0 { parts.append("\(others) unrecognized instance\(others == 1 ? "" : "s")") }
+        return parts.joined(separator: ", ")
+    }
+
+    private func updateDidFinish(_ outcome: UpdateInstaller.Outcome, update: StagedUpdate) {
+        isBusy = false
+        updateProgress = nil
+        running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
+        blockedUpdate = UpdateProbe.status(appPath: config.claudeAppPath).blocked
+        rebuildIfVisible()
+
+        func list(_ profiles: [Profile]) -> String { profiles.map(\.label).joined(separator: ", ") }
+
+        switch outcome {
+        case .installed(_, let notReopened) where notReopened.isEmpty:
+            break   // Claude is back, updated. Nothing to add.
+
+        case .installed(let version, let notReopened):
+            presentAlert(
+                style: .warning,
+                title: "Claude updated to \(version), but not everything reopened",
+                message: "Could not reopen: \(list(notReopened)). Open \(notReopened.count == 1 ? "it" : "them") from the menu."
+            )
+
+        case .notInstalled(let notReopened):
+            var message = "Every profile quit, but Claude\u{2019}s installer finished without changing the app \u{2014} it is still \(update.installed). Claude will try again at its next update check."
+            message += notReopened.isEmpty
+                ? "\n\nYour profiles were reopened."
+                : "\n\nCould not reopen: \(list(notReopened)). Open \(notReopened.count == 1 ? "it" : "them") from the menu."
+            presentAlert(style: .warning, title: "The update did not install", message: message)
+
+        case .quitTimedOut(let stillRunning, let closed):
+            var message = "\(describe(stillRunning)) did not quit within a minute \u{2014} Claude may be showing a dialog of its own. Once it has quit, the update installs by itself."
+            if !closed.isEmpty {
+                message += "\n\nNothing was reopened, because the installer may start the moment that happens. Closed: \(list(closed)). Give the update a few seconds after the last profile quits, then open \(closed.count == 1 ? "it" : "them") from the menu."
+            }
+            presentAlert(style: .warning, title: "Not every Claude profile quit", message: message)
+
+        case .updaterStuck:
+            presentAlert(
+                style: .warning,
+                title: "Claude\u{2019}s installer has not finished",
+                message: "Every profile quit, but the installer is still running after three minutes. Nothing was reopened, so the app is not replaced underneath a running profile. Open your profiles from the menu once it is done \u{2014} Diagnostics shows whether the installer is still running."
+            )
+
+        case .quitRefused:
+            presentAlert(
+                style: .warning,
+                title: "Claude did not accept the request to quit",
+                message: "Nothing was quit and nothing was changed. Quit every Claude profile yourself and the update installs by itself."
+            )
+
+        case .changedSinceConfirmation:
+            presentAlert(
+                style: .informational,
+                title: "Nothing was quit",
+                message: "The set of running Claude instances changed while the confirmation was open. Open the menu and try again."
+            )
+        }
     }
 
     // MARK: - Actions: app level

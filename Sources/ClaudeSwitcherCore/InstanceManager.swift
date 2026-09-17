@@ -7,7 +7,7 @@ import Foundation
 /// the argument vector" are entirely different claims: the first identifies the default
 /// account, the second identifies nothing at all. Collapsing them onto `nil` would make any
 /// process we lack permission to inspect masquerade as the user's default account.
-public enum InstanceProfile: Equatable {
+public enum InstanceProfile: Equatable, Sendable {
     /// Launched with no `--user-data-dir`: the app's own default profile.
     case defaultProfile
     /// Launched with `--user-data-dir=<normalized path>`.
@@ -17,7 +17,7 @@ public enum InstanceProfile: Equatable {
 }
 
 /// One live Claude.app process, tagged with the profile it was launched against.
-public struct RunningInstance: Equatable {
+public struct RunningInstance: Equatable, Sendable {
     public let pid: pid_t
     public let profile: InstanceProfile
 
@@ -57,7 +57,9 @@ public enum InstanceManagerError: Error, LocalizedError {
 /// identified purely by its Electron user-data directory: an instance launched with
 /// `--user-data-dir=X` is a separate app login (and therefore a separate Anthropic account)
 /// for both the chat and the Code tab, while an instance with no such argument is the
-/// default profile. Switching accounts is therefore launch-or-focus; nothing is ever quit.
+/// default profile. Switching accounts is therefore launch-or-focus; switching never quits
+/// anything. The one place an instance is ever asked to quit is ``terminate(pid:expecting:)``,
+/// reached only from the explicit, confirmed "install update" action (see ``UpdateInstaller``).
 public enum InstanceManager {
 
     /// The Electron flag that selects a profile directory.
@@ -164,6 +166,23 @@ public enum InstanceManager {
         if let bundleID, app.bundleIdentifier != bundleID { return false }
         // macOS 14+ spelling; `activate(options:)` is deprecated as of 14.0.
         return app.activate()
+    }
+
+    // MARK: - Quitting
+
+    /// Asks the instance with `pid` to quit, exactly as Command-Q would. Returns whether the request
+    /// was sent — not whether the app has quit; Claude runs its own cleanup first.
+    ///
+    /// This is the only call that ever ends a Claude process, and it stays the gentle one:
+    /// never `forceTerminate()`, never a signal. `bundleID` is required rather than optional
+    /// so the pid-reuse guard (see ``activate(pid:expecting:)``) can never be skipped — a
+    /// recycled pid must not get some other app quit.
+    @discardableResult
+    public static func terminate(pid: pid_t, expecting bundleID: String) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid),
+              app.bundleIdentifier == bundleID
+        else { return false }
+        return app.terminate()
     }
 
     // MARK: - Launching

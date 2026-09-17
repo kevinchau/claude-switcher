@@ -21,12 +21,16 @@ public enum Diagnostics {
 
     /// The full `--dry-run` report. Pure: builds a string from values handed to it, so it
     /// can be printed with no UI, no directory creation and nothing launched.
-    public static func launchPlan(config: Config, running: [RunningInstance]) -> String {
+    public static func launchPlan(config: Config, running: [RunningInstance], update: UpdateStatus? = nil) -> String {
         var lines: [String] = []
         lines.append("claude-switcher launch plan (dry run — nothing was launched or created)")
         lines.append("")
         lines.append("Config file:  \(Config.configURL.path)")
         lines.append("Claude.app:   \(config.claudeAppPath)")
+        // Only when there is something to say: most runs have no update staged.
+        if let update, let summary = stagedUpdateSummary(update, runningCount: running.count) {
+            lines.append("Update:       \(summary)")
+        }
         lines.append("Shared dir:   \(sharedConfigDirectory.path) (shared by every profile; CLAUDE_CONFIG_DIR is never set by this app)")
         lines.append("Active profile: \(config.activeProfileId)")
         lines.append("")
@@ -77,6 +81,19 @@ public enum Diagnostics {
         return lines.joined(separator: "\n")
     }
 
+    /// One line on a downloaded-but-not-installed Claude update, or `nil` when none is staged.
+    static func stagedUpdateSummary(_ status: UpdateStatus, runningCount: Int) -> String? {
+        guard let staged = status.staged else { return nil }
+        let what = "Claude \(staged.staged) is downloaded (installed: \(staged.installed))"
+        guard status.updaterIsRunning else {
+            return what + " — no installer is waiting; Claude asks again at its next update check"
+        }
+        guard runningCount > 0 else {
+            return what + " — installer running, nothing in its way"
+        }
+        return what + " — cannot install until every instance quits (\(runningCount) running)"
+    }
+
     static var sharedConfigDirectory: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude")
     }
@@ -105,6 +122,8 @@ public enum Diagnostics {
 
     public struct Probe: Sendable {
         public var bundleIdentifier: String?
+        /// Installed version, staged update and installer liveness. Read-only.
+        public var update: UpdateStatus
         public var cli: CLIProbe
         /// profile id -> terminal CLI sign-in (existence check only; false on any failure).
         public var signedIn: [String: Bool]
@@ -117,6 +136,7 @@ public enum Diagnostics {
         }
         return Probe(
             bundleIdentifier: InstanceManager.bundleIdentifier(appPath: appPath),
+            update: UpdateProbe.status(appPath: appPath),
             cli: probeCLI(),
             signedIn: signedIn
         )
@@ -174,7 +194,10 @@ public enum Diagnostics {
         let appExists = fileManager.fileExists(atPath: PathNormalizer.normalize(config.claudeAppPath))
         lines.append("  path:            \(config.claudeAppPath)\(appExists ? "" : "  (NOT FOUND)")")
         lines.append("  bundle id:       \(probe.bundleIdentifier ?? "(unreadable — Info.plist has no CFBundleIdentifier)")")
+        lines.append("  version:         \(probe.update.installed.map { "\($0) (\($0.build))" } ?? "(unreadable)")")
         lines.append("  instances up:    \(running.count)")
+        lines.append("  staged update:   \(stagedUpdateSummary(probe.update, runningCount: running.count) ?? "none")")
+        lines.append("  installer:       \(probe.update.updaterIsRunning ? "running (Claude's ShipIt helper — it waits for every instance to quit)" : "not running")")
         lines.append("")
 
         lines.append("SHARED STATE (never per-profile)")
@@ -246,6 +269,7 @@ public enum Diagnostics {
         lines.append("  CLAUDE_CODE_OAUTH_TOKEN and CLAUDE_CONFIG_DIR are never set.")
         lines.append("  No CLAUDE_* variable is ever passed to Claude.app; the account comes from --user-data-dir.")
         lines.append("  The Claude.app bundle is never modified, copied or duplicated.")
+        lines.append("  Claude is only ever asked to quit by \u{201C}Quit All & Install Update\u{2026}\u{201D}, after you confirm — never forced.")
         lines.append("  Removing a profile in this app never deletes anything on disk.")
 
         return lines.joined(separator: "\n")

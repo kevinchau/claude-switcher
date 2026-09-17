@@ -25,6 +25,7 @@ enum MenuBuilder {
         var revealSharedDirectory: Selector
         var showDiagnostics: Selector
         var toggleLaunchAtLogin: Selector
+        var installUpdate: Selector
         var quit: Selector
     }
 
@@ -38,6 +39,11 @@ enum MenuBuilder {
         var configError: String?
         var claudeAppExists: Bool
         var launchAtLogin: LaunchAtLogin
+        /// A downloaded Claude update whose installer is waiting for every instance to quit.
+        /// `nil` when nothing is staged, or when no installer is alive to install it.
+        var blockedUpdate: StagedUpdate?
+        /// Set for the duration of "Quit All & Install Update…"; replaces the offer with progress.
+        var updateProgress: String?
     }
 
     // MARK: - Build
@@ -56,8 +62,19 @@ enum MenuBuilder {
             menu.addItem(informationalItem("Claude.app not found at \(input.config.claudeAppPath)"))
             menu.addItem(informationalItem("Pick it with \u{201C}Choose Claude.app\u{2026}\u{201D} below."))
         }
-        if input.isBusy {
+        if let progress = input.updateProgress {
+            menu.addItem(informationalItem(progress))
+        } else if input.isBusy {
             menu.addItem(informationalItem("Starting Claude\u{2026}"))
+        } else if let update = input.blockedUpdate, !input.running.isEmpty {
+            // Claude's installer waits for every instance of the app to quit, so with more than
+            // one profile open an update can wait forever — and a profile that quits itself to
+            // be updated never comes back. Say so, and offer the one way through.
+            menu.addItem(informationalItem("Claude \(update.staged) is downloaded but can\u{2019}t install until every profile quits."))
+            let installItem = NSMenuItem(title: "Quit All & Install Update\u{2026}", action: actions.installUpdate, keyEquivalent: "")
+            installItem.target = target
+            installItem.toolTip = "Asks every running Claude profile to quit, waits for Claude\u{2019}s own installer to finish, then reopens the profiles that were running. Nothing happens until you confirm."
+            menu.addItem(installItem)
         }
 
         menu.addItem(.separator())
@@ -145,6 +162,7 @@ enum MenuBuilder {
         // MARK: App-level items
         let chooseItem = NSMenuItem(title: "Choose Claude.app\u{2026}", action: actions.chooseClaudeApp, keyEquivalent: "")
         chooseItem.target = target
+        chooseItem.isEnabled = input.updateProgress == nil
         chooseItem.toolTip = "Currently: \(input.config.claudeAppPath)"
         menu.addItem(chooseItem)
 
@@ -178,6 +196,8 @@ enum MenuBuilder {
 
         let quitItem = NSMenuItem(title: "Quit Claude Switcher", action: actions.quit, keyEquivalent: "q")
         quitItem.target = target
+        // Quitting mid-update would leave every profile closed with nothing to reopen them.
+        quitItem.isEnabled = input.updateProgress == nil
         menu.addItem(quitItem)
 
         return menu
