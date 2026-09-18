@@ -19,6 +19,8 @@ enum MenuBuilder {
         var revealSharedDirectory: Selector
         var showDiagnostics: Selector
         var toggleLaunchAtLogin: Selector
+        var toggleReopenAfterUpdate: Selector
+        var toggleBlockUpdates: Selector
         var installUpdate: Selector
         var quit: Selector
     }
@@ -42,6 +44,8 @@ enum MenuBuilder {
         var usage: [String: UsageReading] = [:]
         /// The moment the menu is built; readings are judged against it.
         var now: Date = Date()
+        /// Set after profiles were reopened automatically; shown once so it is never silent.
+        var autoReopenNotice: String?
     }
 
     // MARK: - Build
@@ -59,6 +63,9 @@ enum MenuBuilder {
         if !input.claudeAppExists {
             menu.addItem(informationalItem("Claude.app not found at \(input.config.claudeAppPath)"))
             menu.addItem(informationalItem("Pick it with \u{201C}Choose Claude.app\u{2026}\u{201D} below."))
+        }
+        if let notice = input.autoReopenNotice {
+            menu.addItem(informationalItem(notice))
         }
         if let progress = input.updateProgress {
             menu.addItem(informationalItem(progress))
@@ -210,6 +217,20 @@ enum MenuBuilder {
             loginItem.toolTip = "Only an installed app bundle can open at login \u{2014} not a bare `swift run` binary."
         }
         menu.addItem(loginItem)
+
+        let reopenItem = NSMenuItem(title: "Reopen Profiles After Claude Updates", action: actions.toggleReopenAfterUpdate, keyEquivalent: "")
+        reopenItem.target = target
+        reopenItem.state = input.config.reopenAfterUpdate ? .on : .off
+        reopenItem.toolTip = "When Claude updates itself it closes, and its installer only reopens the default profile. With this on, the other profiles that closed for the update are started again, in the background, once the update is in. It only ever starts profiles \u{2014} nothing is quit."
+        menu.addItem(reopenItem)
+
+        let blockItem = NSMenuItem(title: "Block Claude Auto-Updates", action: actions.toggleBlockUpdates, keyEquivalent: "")
+        blockItem.target = target
+        blockItem.state = input.config.blockClaudeUpdates ? .on : .off
+        blockItem.toolTip = input.config.blockClaudeUpdates
+            ? "Claude will not update itself. No security or compatibility fixes arrive, and the Code tab\u{2019}s CLI stops updating too. Applies the next time each profile starts. To update: turn this off and restart a profile."
+            : "Stops Claude Desktop from downloading or installing updates, so it never closes itself to update. Asks first, and tells you what you give up."
+        menu.addItem(blockItem)
 
         menu.addItem(.separator())
 

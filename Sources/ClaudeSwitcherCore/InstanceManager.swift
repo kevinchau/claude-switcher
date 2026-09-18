@@ -189,10 +189,15 @@ public enum InstanceManager {
 
     /// Focuses the instance belonging to `profile`, launching it first if it is not running.
     ///
+    /// `activates: false` is for launches the user did not ask for just now (reopening a
+    /// profile after Claude updated itself): the new instance starts in the background, and an
+    /// instance that is already up is left exactly where it is.
+    ///
     /// The completion is always delivered on the main queue.
     public static func launch(
         profile: Profile,
         appPath: String,
+        activates: Bool = true,
         completion: @escaping @Sendable (Result<pid_t, Error>) -> Void
     ) {
         let normalizedAppPath = PathNormalizer.normalize(appPath)
@@ -205,6 +210,10 @@ public enum InstanceManager {
         // the default account.
         if let existing = runningInstances(appPath: normalizedAppPath)
             .first(where: { $0.profile == wanted }) {
+            guard activates else {
+                finish(.success(existing.pid), completion)
+                return
+            }
             guard activate(pid: existing.pid, expecting: bundleIdentifier(appPath: normalizedAppPath)) else {
                 finish(.failure(InstanceManagerError.activationFailed(existing.pid)), completion)
                 return
@@ -238,6 +247,9 @@ public enum InstanceManager {
         // bring the Work window to the front and report success, and the caller would record
         // Personal as the active account while the user stared at the other one.
         configuration.createsNewApplicationInstance = true
+        configuration.activates = activates
+        // A launch nobody asked for just now must not put a system dialog in front of them.
+        if !activates { configuration.promptsUserIfNeeded = false }
 
         // Only a named profile carries the flag. The default profile must be launched with no
         // `--user-data-dir` at all, which is what selects the app's own default profile dir.

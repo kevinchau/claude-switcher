@@ -136,14 +136,30 @@ public struct Config: Codable, Equatable, Sendable {
     /// All configured profiles, in display order.
     public var profiles: [Profile]
 
-    public init(claudeAppPath: String, activeProfileId: String, profiles: [Profile]) {
+    /// Reopen a profile that closed itself to install a Claude update, once the update is in.
+    /// Claude's installer only ever brings the default profile back. Launch-only: nothing is
+    /// ever quit on the strength of this setting.
+    public var reopenAfterUpdate: Bool
+
+    /// Keep Claude Desktop from updating itself, through its own `disableAutoUpdates` policy.
+    public var blockClaudeUpdates: Bool
+
+    public init(
+        claudeAppPath: String,
+        activeProfileId: String,
+        profiles: [Profile],
+        reopenAfterUpdate: Bool = true,
+        blockClaudeUpdates: Bool = false
+    ) {
         self.claudeAppPath = claudeAppPath
         self.activeProfileId = activeProfileId
         self.profiles = profiles
+        self.reopenAfterUpdate = reopenAfterUpdate
+        self.blockClaudeUpdates = blockClaudeUpdates
     }
 
     private enum CodingKeys: String, CodingKey {
-        case claudeAppPath, activeProfileId, profiles
+        case claudeAppPath, activeProfileId, profiles, reopenAfterUpdate, blockClaudeUpdates
     }
 
     public init(from decoder: Decoder) throws {
@@ -151,6 +167,9 @@ public struct Config: Codable, Equatable, Sendable {
         self.claudeAppPath = try container.decode(String.self, forKey: .claudeAppPath)
         self.activeProfileId = try container.decode(String.self, forKey: .activeProfileId)
         self.profiles = try container.decode([Profile].self, forKey: .profiles)
+        // Settings added after 0.1: a file written by an older version simply lacks them.
+        self.reopenAfterUpdate = try container.decodeIfPresent(Bool.self, forKey: .reopenAfterUpdate) ?? true
+        self.blockClaudeUpdates = try container.decodeIfPresent(Bool.self, forKey: .blockClaudeUpdates) ?? false
 
         // Ids are the primary key for every lookup and mutation, so reject a
         // file that would make `profile(id:)` ambiguous. Directory collisions
@@ -190,14 +209,6 @@ public struct Config: Codable, Equatable, Sendable {
         return URL(fileURLWithPath: (path as NSString).resolvingSymlinksInPath)
     }
 
-    /// Rejects a `userDataDir` that names a directory Electron must never be pointed at.
-    ///
-    /// `--user-data-dir` makes Claude.app treat the directory as its own Chromium profile: it
-    /// writes `Cookies`, `Local Storage/`, `IndexedDB/`, `SingletonLock` and friends into it.
-    /// Aimed at `~/.claude`, that would scribble Chromium state through the very directory this
-    /// tool exists to keep shared and intact. Aimed at the app's *own* default profile
-    /// directory, it would put two concurrent Chromium processes on one LevelDB store, which
-    /// can corrupt the user's primary Desktop login.
     /// Claude.app's own Electron user-data directory — where the default profile lives.
     ///
     /// Electron derives it from the product name, so the folder is `Claude` whatever the
@@ -206,6 +217,21 @@ public struct Config: Codable, Equatable, Sendable {
         PathNormalizer.normalize("Library/Application Support/Claude", home: home)
     }
 
+    /// The suffix Claude appends to a user-data directory to get that profile's policy
+    /// directory (`Claude` → `Claude-3p`). A directory that already ends in it is its own
+    /// policy directory.
+    public static let policyDirectorySuffix = "-3p"
+
+    /// Rejects a `userDataDir` that names a directory Electron must never be pointed at.
+    ///
+    /// `--user-data-dir` makes Claude.app treat the directory as its own Chromium profile: it
+    /// writes `Cookies`, `Local Storage/`, `IndexedDB/`, `SingletonLock` and friends into it.
+    /// Aimed at `~/.claude`, that would scribble Chromium state through the very directory this
+    /// tool exists to keep shared and intact. Aimed at the app's *own* default profile
+    /// directory, it would put two concurrent Chromium processes on one LevelDB store, which
+    /// can corrupt the user's primary Desktop login. A directory ending in `-3p` is where
+    /// Claude keeps another profile's policy files — `Claude-3p` belongs to the default
+    /// profile — so a profile living there would share a directory with them.
     static func validateReservedDirectory(_ raw: String?) throws {
         guard let raw else { return }
         let candidate = PathNormalizer.normalize(raw)
@@ -221,6 +247,10 @@ public struct Config: Codable, Equatable, Sendable {
         ]
         for entry in reserved where entry.path == candidate {
             throw ConfigError.reservedUserDataDir(candidate, entry.why)
+        }
+        if (candidate as NSString).lastPathComponent.lowercased().hasSuffix(policyDirectorySuffix) {
+            throw ConfigError.reservedUserDataDir(
+                candidate, "a name Claude reserves for policy files (it ends in \(policyDirectorySuffix))")
         }
     }
 

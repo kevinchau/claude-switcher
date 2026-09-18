@@ -60,7 +60,8 @@ final class ConfigRoundTripTests: XCTestCase {
         let object = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: data) as? [String: Any])
 
-        XCTAssertEqual(Set(object.keys), ["claudeAppPath", "activeProfileId", "profiles"])
+        XCTAssertEqual(Set(object.keys), ["claudeAppPath", "activeProfileId", "profiles",
+                                          "reopenAfterUpdate", "blockClaudeUpdates"])
 
         let profiles = try XCTUnwrap(object["profiles"] as? [[String: Any]])
         let work = try XCTUnwrap(profiles.first { $0["id"] as? String == "work" })
@@ -169,5 +170,36 @@ final class ConfigRoundTripTests: XCTestCase {
         XCTAssertTrue(
             Config.configURL.path.hasSuffix(".config/claude-switcher/config.json"),
             "unexpected config path: \(Config.configURL.path)")
+    }
+
+    // MARK: - Settings added after 0.1
+
+    /// A file written by an older version has neither key. It must still load, with reopening
+    /// on (launch-only, so safe to default on) and the update block off (it changes Claude).
+    func testJSONMissingTheNewSettingsDecodesWithDefaults() throws {
+        let json = #"{"claudeAppPath":"/Applications/Claude.app","activeProfileId":"default","profiles":[{"id":"default","label":"Personal"}]}"#
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        XCTAssertTrue(config.reopenAfterUpdate)
+        XCTAssertFalse(config.blockClaudeUpdates)
+    }
+
+    func testTheNewSettingsRoundTrip() throws {
+        var config = makeConfig()
+        config.reopenAfterUpdate = false
+        config.blockClaudeUpdates = true
+        let decoded = try JSONDecoder().decode(Config.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(decoded, config)
+    }
+
+    /// Claude keeps a profile's policy files in `<its directory>-3p`; `Claude-3p` belongs to
+    /// the default profile. A profile living in such a directory would share it with them.
+    func testADirectoryEndingInThreePIsReserved() {
+        var config = makeConfig()
+        for dir in ["/Users/me/Library/Application Support/Claude-3p", "/Users/me/x/Work-3P/", "~/anything-3p"] {
+            XCTAssertThrowsError(try config.addProfile(Profile(id: UUID().uuidString, label: "X", userDataDir: dir)), dir) { error in
+                guard case ConfigError.reservedUserDataDir = error else { return XCTFail("\(error)") }
+            }
+        }
+        XCTAssertNoThrow(try config.addProfile(Profile(id: "ok", label: "OK", userDataDir: "/Users/me/x/Claude-3pm")))
     }
 }

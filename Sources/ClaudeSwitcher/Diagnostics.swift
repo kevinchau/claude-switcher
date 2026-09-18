@@ -26,6 +26,8 @@ public enum Diagnostics {
         running: [RunningInstance],
         update: UpdateStatus? = nil,
         usage: [String: UsageReading] = [:],
+        updateAttempts: [String: UpdateAttempt] = [:],
+        updateBlocks: [String: UpdateBlock.State] = [:],
         now: Date = Date()
     ) -> String {
         var lines: [String] = []
@@ -73,6 +75,12 @@ public enum Diagnostics {
             lines.append("  keychain item:   \(KeychainProbe.serviceName(forCredDir: profile.credDir))  (terminal CLI only; existence check only — the secret is never read)")
             lines.append("  terminal cmd:    \(terminalCommand(for: profile))")
             lines.append("  usage:           \(UsageText.summary(usage[profile.id], time: clockTime))  (read from this profile's plan-usage-history.json; never fetched)")
+            if let attempt = updateAttempts[profile.id] {
+                lines.append("  closed itself:   \(closedForUpdateSummary(attempt))")
+            }
+            if let block = updateBlocks[profile.id] {
+                lines.append("  update block:    \(updateBlockSummary(block))")
+            }
             lines.append("")
         }
 
@@ -99,6 +107,21 @@ public enum Diagnostics {
             return what + " — installer running, nothing in its way"
         }
         return what + " — cannot install until every instance quits (\(runningCount) running)"
+    }
+
+    /// A profile's `update-attempt` marker: it quit itself to install an update and has not
+    /// been opened since.
+    static func closedForUpdateSummary(_ attempt: UpdateAttempt) -> String {
+        "to install an update at \(clockTime(attempt.at)) (it was on \(attempt.fromVersion)); Claude's installer reopens only the default profile"
+    }
+
+    static func updateBlockSummary(_ state: UpdateBlock.State) -> String {
+        switch state {
+        case .off: return "off \u{2014} Claude updates itself"
+        case .on: return "on \u{2014} Claude's updater does not start (takes effect at this profile's next start)"
+        case .damaged: return "incomplete \u{2014} our policy files are half there; toggling the setting rewrites them"
+        case .foreign(let why): return "left alone \u{2014} there is a policy folder this tool did not create: \(why)"
+        }
     }
 
     /// Clock times in reports, in the user's locale, with the weekday when not today.
@@ -150,6 +173,10 @@ public enum Diagnostics {
         public var signedIn: [String: Bool]
         /// profile id -> the usage Claude Desktop last recorded, from the profile's own file.
         public var usage: [String: UsageReading]
+        /// profile id -> the marker of a profile that closed itself for an update. Read-only.
+        public var updateAttempts: [String: UpdateAttempt]
+        /// profile id -> whether our update-block policy is in place for it.
+        public var updateBlocks: [String: UpdateBlock.State]
         public var now: Date
     }
 
@@ -157,7 +184,11 @@ public enum Diagnostics {
         let now = Date()
         var signedIn: [String: Bool] = [:]
         var usage: [String: UsageReading] = [:]
+        var updateAttempts: [String: UpdateAttempt] = [:]
+        var updateBlocks: [String: UpdateBlock.State] = [:]
         for query in profiles {
+            updateAttempts[query.id] = UpdateAttemptMarker.read(userDataDir: query.userDataDir)
+            updateBlocks[query.id] = UpdateBlock.state(userDataDir: query.userDataDir)
             signedIn[query.id] = KeychainProbe.isSignedIn(credDir: query.credDir)
             if let samples = UsageHistory.read(userDataDir: query.userDataDir),
                let reading = UsageReading.make(samples: samples, now: now) {
@@ -170,6 +201,8 @@ public enum Diagnostics {
             cli: probeCLI(),
             signedIn: signedIn,
             usage: usage,
+            updateAttempts: updateAttempts,
+            updateBlocks: updateBlocks,
             now: now
         )
     }
@@ -285,6 +318,12 @@ public enum Diagnostics {
             lines.append("    argv:           \(launchArguments(for: profile).map { "\"\($0)\"" }.joined(separator: " "))")
             lines.append("    terminal cmd:   \(terminalCommand(for: profile))")
             lines.append("    usage:          \(UsageText.summary(probe.usage[profile.id], time: clockTime))")
+            if let attempt = probe.updateAttempts[profile.id] {
+                lines.append("    closed itself:  \(closedForUpdateSummary(attempt))")
+            }
+            if let block = probe.updateBlocks[profile.id] {
+                lines.append("    update block:   \(updateBlockSummary(block))")
+            }
             lines.append("")
         }
 
@@ -304,6 +343,8 @@ public enum Diagnostics {
         lines.append("  The Claude.app bundle is never modified, copied or duplicated.")
         lines.append("  Claude is only ever asked to quit by \u{201C}Quit All & Install Update\u{2026}\u{201D}, after you confirm — never forced.")
         lines.append("  Usage is read from each profile's own plan-usage-history.json — never written, never fetched, no token or cookie read.")
+        lines.append("  Anything this app does on its own initiative only ever launches a profile; it never quits one.")
+        lines.append("  The only files ever created in Claude's data area are the two update-block policy files, on your toggle; a policy this tool did not create is never touched.")
         lines.append("  Removing a profile in this app never deletes anything on disk.")
 
         return lines.joined(separator: "\n")

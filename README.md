@@ -76,6 +76,8 @@ Choose Claude.app…
 Reveal ~/.claude in Finder
 Diagnostics…
 Launch at Login
+Reopen Profiles After Claude Updates
+Block Claude Auto-Updates
 ──────────────────────────────
 Quit Claude Switcher
 ```
@@ -198,6 +200,8 @@ The menu is rebuilt on every open so running state is fresh.
 - **Choose Claude.app…** — an `NSOpenPanel`, offered when the configured path is missing or on request.
 - **Reveal ~/.claude in Finder**.
 - **Diagnostics** — a selectable-text alert with: the config path; the resolved `Claude.app` path, its `CFBundleIdentifier` and version, any staged update and whether Claude's installer is running; the shared config dir (`~/.claude`) and confirmation that `CLAUDE_CONFIG_DIR` is unset; each profile with its normalized directories, derived Keychain service name, running pid and last recorded usage; and the `claude` CLI version for both the `PATH` binary and the app-managed sidecar if present.
+- **Reopen Profiles After Claude Updates** (on by default) — when Claude updates itself it closes, and its installer only ever reopens the default profile. With this on, the other profiles that closed *for the update* are started again, in the background, once it is installed ([§2.11](#211-after-an-update-claude-only-brings-back-the-default-profile)). It is the one thing the app does on its own initiative, and it can only launch: nothing is ever quit by it. When it has acted, the next menu open says so in one line.
+- **Block Claude Auto-Updates** (off by default) — stops Claude Desktop from downloading or installing updates at all, through Claude's own `disableAutoUpdates` policy, so it never closes itself to update ([§2.12](#212-blocking-claudes-auto-updates)). Turning it on asks first and spells out the cost. It applies the next time each profile starts; nothing is quit to apply it.
 - **Launch at Login** — a checkbox bound to `SMAppService.mainApp`, reflecting `.status`. A bundle that has never been registered reports `.notFound`, which is *not* an error: it is shown as an unchecked box and clicking it registers. The item is greyed out only when the process is not inside an `.app` bundle (`swift run`), where there is nothing launchd could register.
 - **Quit**.
 
@@ -317,7 +321,7 @@ The hash covers **exactly the string handed to the CLI**, so `claude-switcher` n
 
 Claude Desktop updates itself with Squirrel. When an update has downloaded, the app starts a helper, `ShipIt`, that notes every instance of the app running at that moment, waits until **all of them** have exited, and only then swaps the bundle. (Each running instance re-requests the install at its hourly update check, which restarts the helper with a fresh list.) Claude also updates "stealthily": after an idle timeout it quits itself (`beforeQuitForUpdate … going down for update` in `~/Library/Logs/Claude/main.log`), expecting the helper to install and bring it back.
 
-With one instance that works — observed end to end in about seven seconds. With two it cannot: the other profile never exits, so the helper never starts installing, and **the profile that quit itself stays closed**. Reopening it by hand only restarts the cycle — it re-requests the install and quits again the next time it goes idle. The tell-tale is `~/Library/Caches/<bundle id>.ShipIt/ShipIt_stderr.log` filling with `Detected this as an install request` lines that are never followed by `Beginning installation`.
+With one instance the install goes through — observed end to end in about seven seconds — but what comes back is **only the default profile**: the installer relaunches Claude with no arguments, so a named profile that quit itself stays closed even after a successful update. That half of the problem is [§2.11](#211-after-an-update-claude-only-brings-back-the-default-profile)'s. With two it cannot: the other profile never exits, so the helper never starts installing, and **the profile that quit itself stays closed**. Reopening it by hand only restarts the cycle — it re-requests the install and quits again the next time it goes idle. The tell-tale is `~/Library/Caches/<bundle id>.ShipIt/ShipIt_stderr.log` filling with `Detected this as an install request` lines that are never followed by `Beginning installation`.
 
 The switcher cannot change how Claude's updater works, so it does the two things it can:
 
@@ -347,6 +351,33 @@ The switcher reads that file when the menu opens and shows the latest sample of 
 - **The weekly reset is a schedule, and the bound tightens over time.** The weekly limit resets at the same weekday and time every week (re-anchored only when the plan changes). Every observed drop in the weekly figure brackets one reset between two consecutive samples, and since the schedule repeats, the brackets of earlier weeks are the same moment shifted by whole weeks: where they agree they are intersected, so the longer the app has been open around reset time, the narrower the "resets by" on the week row. A bracket that does not line up with the latest one is a re-anchoring and is ignored; a bracket a week or wider says nothing and is skipped. Once a scheduled reset has certainly fallen between the reading and now, the row shows "—". A profile that has never been open across a reset shows no weekly reset yet — its first observed one starts the schedule.
 
 The file is only ever read. Nothing is written, moved or deleted, nothing is fetched, and no token or cookie is touched for this. If a Claude update changes the format, the bars disappear rather than mislead.
+
+### 2.11 After an update, Claude only brings back the default profile
+
+Observed: a named profile quit itself for an update at 00:58:00 (stopping two Code sessions on the way down); the install ran 00:58:01–05; the installer relaunched Claude at 00:58:07 — with no arguments, which is the *default* profile. The named profile stayed closed for eight hours.
+
+Claude leaves a precise record of this. Every quit-for-update — the idle "stealth" update and "install now", and no other kind of quit — writes `update-attempt` into that profile's own user-data directory: `{"fromVersion", "toVersion", "ts"}`. Only that profile's next launch reads and deletes it (it is how Claude logs "Previous update install succeeded"). So a marker that is still there, for a profile that is not running, whose `fromVersion` is no longer the installed version, means exactly: *this profile closed itself for an update that has since been installed.* A profile you quit yourself has no marker and is never reopened.
+
+With **Reopen Profiles After Claude Updates** on, the switcher watches for Claude instances going away (and looks once at startup and on wake), and then:
+
+- waits for Claude's installer to have *stayed* gone — and never launches while one is alive, not even the one that lingers after installing;
+- stands down when another instance is blocking the install ([§2.9](#29-updates-need-every-instance-to-quit)): a profile reopened then would only quit itself for the same update again, so nothing is launched and no timer is left running — the install cannot start without another instance quitting, which is what triggers the next look;
+- starts the named profiles in the background — it asks macOS not to bring them to the front; how Claude then restores its own window is Claude's decision — skipping any that are already up, checking again before *each* launch that no installer has appeared, never while an instance it cannot identify is running, and one launcher at a time with the menu;
+- treats the **default profile** more warily: Claude's installer relaunches it itself, just before it exits, so it is only started here if it is still absent fifteen seconds after the installer has gone. Two processes on the default profile's data is the failure this guards against;
+- does all of this from **one** switcher process only: a lock file in `~/.config/claude-switcher/` means a second copy of the switcher (a `swift run` next to the installed app) never doubles a launch;
+- ignores markers from before the last boot, older than a day, or already acted on.
+
+The default-profile instance the installer starts is left alone even if you did not have it open: **anything this app does on its own initiative only ever launches.** The code that runs it is handed effects that can start things and nothing else — there is no way to quit from it — and the marker file is only ever read.
+
+### 2.12 Blocking Claude's auto-updates
+
+Reopening puts a profile back, but the sessions it was running were still stopped. Claude Desktop has a supported switch for not updating at all: the policy key `disableAutoUpdates` ("Block auto-updates"). With it set the updater never starts.
+
+Claude reads policy from a root-owned plist in `/Library/Managed Preferences` — an administrator's channel, which this tool never touches — and, when no such plist is in force, from a per-profile *configuration library*: `<user-data dir>-3p/configLibrary/_meta.json` names the applied configuration and `<id>.json` holds it (`Claude-3p` for the default profile). Verified against a throwaway instance on a temporary profile: with `{"disableAutoUpdates": true}` applied, Claude logged `[updater] Auto-updates disabled by enterprise policy` and never enabled its updater, and nothing else about the app changed.
+
+**Block Claude Auto-Updates** writes exactly those two files for every profile (and for profiles added later, before their first launch). What it costs, from the app's own code: security and compatibility fixes stop arriving; the Code tab's `claude` CLI stops updating too; "Check for Updates…" disappears from Claude's menu; Claude reports `update disabled: enterprise_policy` in its telemetry; and an update that is *already* downloaded still installs. To update, turn the block off and restart a profile.
+
+These are the only files this tool ever creates inside Claude's data area, and only on your toggle. The rule for everything it does there: **a file is ours only if it is a regular file, readable, and says exactly what this tool wrote.** Anything else at either path makes the whole library someone else's, and it is then **never touched** — not overwritten, not merged into, not removed; the profile is reported as left alone. That covers another configuration being applied, an organization-managed pointer, an index that cannot be read, a directory or a symbolic link where a file should be, a symlinked library directory — and the subtle one: Claude's own setup screen saves into whichever configuration is open, and with the block on ours is the only one, so a file *with our id* may come to hold your provider settings. "Exists but is not exactly ours" is never treated as "ours, but damaged"; only one of our two files being cleanly absent is. Each path is looked at again immediately before it is written or unlinked. Turning the block off unlinks only files that are still exactly ours, then `rmdir`s the library directory — which succeeds only if it is truly empty; its parent is Claude's own directory and is never removed.
 
 ---
 
@@ -429,7 +460,7 @@ make clean      # rm -rf .build build
 make dry-run    # swift run -c release claude-switcher --dry-run
 ```
 
-`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.5.0`. No Xcode project is involved.
+`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.6.0`. No Xcode project is involved.
 
 ### Layout
 
@@ -437,7 +468,7 @@ A SwiftPM package (`swift-tools-version:6.0`, every target compiled with `.swift
 
 | Target | Path | What it is |
 | --- | --- | --- |
-| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning`, `UpdateProbe`, `UpdateInstaller`, `LoginItem`, `UsageHistory` |
+| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning`, `UpdateProbe`, `UpdateInstaller`, `LoginItem`, `UsageHistory`, `UpdateReopen`, `UpdateBlock`, `AutomationLock` |
 | `claude-switcher` (executable) | `Sources/ClaudeSwitcher` | Thin AppKit shell: `main.swift`, `AppDelegate`, `MenuBuilder`, `Diagnostics` |
 | `ClaudeSwitcherTests` | `Tests/ClaudeSwitcherTests` | Tests, importing `ClaudeSwitcherCore` |
 
@@ -445,7 +476,7 @@ The split is deliberate: a test target cannot import an executable target cleanl
 
 ### Tests
 
-`make test` runs **194 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, usage-history parsing and session-window inference (including series shaped like the real ones), staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
+`make test` runs **248 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, usage-history parsing and session-window inference (including series shaped like the real ones), reopening profiles after Claude's own update (the launch-only sequence, run against the same scripted fake), the update-block policy files under a temporary home (including every case where a library it did not create must be left alone), staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
 
 ### `--dry-run` and `--help`
 
@@ -470,7 +501,9 @@ Written atomically with mode `0600` (parent directories created as needed). If t
       "userDataDir": "/Users/me/Library/Application Support/Claude-work",
       "credDir": "/Users/me/.claude-accounts/work"
     }
-  ]
+  ],
+  "reopenAfterUpdate": true,
+  "blockClaudeUpdates": false
 }
 ```
 
@@ -482,10 +515,12 @@ Written atomically with mode `0600` (parent directories created as needed). If t
 | `profiles[].label` | Menu title. Change it with **Rename Profile**; nothing else about the profile changes. |
 | `profiles[].userDataDir` | `null` ⇒ the app's own default profile dir; **pass no `--user-data-dir` argument**. Otherwise the Electron profile dir, created (`mkdir -p`) at launch if missing. |
 | `profiles[].credDir` | `null` ⇒ the default credential slot; **omit `CLAUDE_SECURESTORAGE_CONFIG_DIR` entirely**. Otherwise the terminal CLI's credential dir. |
+| `reopenAfterUpdate` | Default `true`. Reopen profiles that closed themselves for a Claude update ([§2.11](#211-after-an-update-claude-only-brings-back-the-default-profile)). Launch-only. |
+| `blockClaudeUpdates` | Default `false`. Keep Claude from updating itself ([§2.12](#212-blocking-claudes-auto-updates)). Editing this by hand does not write or remove the policy files; the menu item does. At startup a `true` is (re)applied, a `false` removes nothing. |
 
 A profile with `userDataDir == nil && credDir == nil` is *the default profile*. Note the id derived from a label is lowercased (`Work` ⇒ `work`), and so is the directory it names (`Claude-work`), which is why the example above reads `Claude-work` and not `Claude-Work`.
 
-**Decoding tolerance:** `userDataDir` and `credDir` may be omitted entirely from a hand-edited file, and an **empty string decodes as `nil`** — so a stray `""` can never reach the launcher as a real path or be exported as a blank `CLAUDE_SECURESTORAGE_CONFIG_DIR`. Both keys are always written back as explicit `null`s so the file on disk documents both knobs.
+**Decoding tolerance:** `reopenAfterUpdate` and `blockClaudeUpdates` may be absent — a file written by an older version loads with the defaults. `userDataDir` and `credDir` may be omitted entirely from a hand-edited file, and an **empty string decodes as `nil`** — so a stray `""` can never reach the launcher as a real path or be exported as a blank `CLAUDE_SECURESTORAGE_CONFIG_DIR`. Both keys are always written back as explicit `null`s so the file on disk documents both knobs.
 
 **Validation rules.** These are enforced by pure, throwing mutators on `Config` (nothing here touches disk), *and* — for the subset that keeps profiles distinguishable — again at **load** time, because this file is advertised as hand-editable and a bad edit must not produce a config the tool cannot reason about.
 
@@ -494,7 +529,7 @@ Checked when adding a profile (`addProfile`):
 - **empty id** ⇒ `malformed("a profile id must not be empty")`.
 - **duplicate id** ⇒ `duplicateID`. Ids are the primary key for every lookup and mutation.
 - **a second profile that omits `userDataDir`** ⇒ `duplicateDefaultProfile`. Only **one** profile may omit it. A profile's *Desktop identity* **is** its `userDataDir` and nothing else — that argument is the only thing that selects a different app login. Two profiles without one would therefore both bind to the same single default instance: selecting either would focus the same window while the menu reported a switch, which is exactly the mis-attribution the three-valued matching in [§2.8](#28-what-the-tool-actually-does-with-all-this) exists to prevent. (It would also strand the duplicate permanently, since `removeProfile` refuses any profile that is `isDefaultProfile`.)
-- **a reserved `userDataDir`** ⇒ `reservedUserDataDir(dir, why)`. Rejected, after normalization: `$HOME`, `~/.claude`, and `~/Library/Application Support/Claude`. The reason is what `--user-data-dir` *does*: Claude.app treats that directory as its own Chromium profile and writes `Cookies`, `Local Storage/`, `IndexedDB/` and `SingletonLock` into whatever it is given. Aimed at `~/.claude`, it would scribble Chromium state through the one directory this tool exists to keep shared and intact. Aimed at the app's *own* default profile dir, it would put two concurrent Chromium processes on a single LevelDB store — which can corrupt the user's primary Desktop login.
+- **a reserved `userDataDir`** ⇒ `reservedUserDataDir(dir, why)`. Rejected, after normalization: `$HOME`, `~/.claude`, `~/Library/Application Support/Claude`, and **any directory whose name ends in `-3p`** (case-insensitively) — Claude keeps a profile's policy files in `<its directory>-3p`, and `Claude-3p` is the default profile's ([§2.12](#212-blocking-claudes-auto-updates)). The reason is what `--user-data-dir` *does*: Claude.app treats that directory as its own Chromium profile and writes `Cookies`, `Local Storage/`, `IndexedDB/` and `SingletonLock` into whatever it is given. Aimed at `~/.claude`, it would scribble Chromium state through the one directory this tool exists to keep shared and intact. Aimed at the app's *own* default profile dir, it would put two concurrent Chromium processes on a single LevelDB store — which can corrupt the user's primary Desktop login.
 - **duplicate `userDataDir`** ⇒ `duplicateUserDataDir`, and **duplicate `credDir`** ⇒ `duplicateCredDir`, each compared across profiles after `PathNormalizer` normalization (so `~/x` and `/Users/me/x/` collide as they should) and with `nil`/`""` folded together as "not set".
 
 Checked when removing or switching:
@@ -523,6 +558,8 @@ Checked again at **load** time (`Config.init(from:)`), since the file is hand-ed
 - **Chat history is per-account and cannot be shared.** It lives server-side on the Anthropic account. Cowork/remote sessions and usage limits are likewise per-account. Only the local `~/.claude` state is shared.
 - **The tool never reads, writes or migrates credentials.** Each account is signed in by you, interactively, once. Keychain interaction is an existence check with `security find-generic-password -s <service> -a "$USER"` and never `-w`; any failure is indistinguishable from a genuine absence and is reported the same way (see the hint table under [Usage](#usage)). `CLAUDE_CODE_OAUTH_TOKEN` is never set by this tool.
 - **The "terminal: signed in" hint is about the CLI only.** It says nothing about whether the Desktop profile is logged in.
+- **After an update Claude only reopens the default profile.** The switcher reopens the others that closed for it ([§2.11](#211-after-an-update-claude-only-brings-back-the-default-profile)), but the sessions they were running were still stopped by Claude on the way down, and it relies on an undocumented marker file — if Claude stops writing it, the reopening simply stops.
+- **Blocking auto-updates means no security fixes until you unblock.** It also freezes the Code tab's CLI version, and it works through a policy file Claude documents for administrators, not end users ([§2.12](#212-blocking-claudes-auto-updates)). It was verified on a throwaway profile; your own profiles pick it up at their next start.
 - **Claude cannot update itself while two profiles are open.** Its installer waits for every instance to quit, so a profile that quits itself to be updated stays closed until the rest do too ([§2.9](#29-updates-need-every-instance-to-quit)). The menu says when this is happening and offers **Quit All & Install Update…**; using it interrupts whatever Claude is doing in every profile, like any quit. Detection reads Squirrel's internal files, so a Claude update may break it — in which case the menu simply stops mentioning updates, and quitting every profile by hand still works.
 - **Usage bars are the app's own last observation, not a live figure.** They come from a file Claude Desktop writes for itself ([§2.10](#210-where-the-usage-bars-come-from)); it is undocumented, it is updated only while that profile is open, and the "resets by" times are inferred upper bounds — the session's from its rolling five-hour window, the week's from the fixed weekly schedule observed in the history. A dash means the reading is certainly out of date.
 - **Removing a profile never deletes its data.** The Electron profile dir and credential dir are left on disk; delete them yourself if you want them gone.
@@ -531,7 +568,7 @@ Checked again at **load** time (`Config.init(from:)`), since the file is hand-ed
 
 ## Not affiliated with Anthropic
 
-This is an independent, unofficial project. It is not affiliated with, endorsed by, or supported by Anthropic. "Claude" and "Anthropic" are trademarks of Anthropic, PBC. The tool never modifies, copies or duplicates the `Claude.app` bundle — it only reads its `Info.plist`, launches it with a standard Electron flag and, solely when you ask it to, asks it to quit so that Claude's own updater can run.
+This is an independent, unofficial project. It is not affiliated with, endorsed by, or supported by Anthropic. "Claude" and "Anthropic" are trademarks of Anthropic, PBC. The tool never modifies, copies or duplicates the `Claude.app` bundle — it only reads its `Info.plist`, launches it with a standard Electron flag and, solely when you ask it to, asks it to quit so that Claude's own updater can run. On its own initiative it only ever starts a profile. The one thing it ever writes into Claude's data area is the small update-block policy, and only if you turn that on.
 
 **It never handles your credentials.** You sign in to each account yourself, interactively, in the app or the CLI. Keychain access is an existence check only — `security find-generic-password -s "<service>" -a "$USER"`, **never** with `-w` — so no secret is ever read, written, copied, migrated or deleted. No `CLAUDE_*` variable is ever injected into a launched app's environment, and `CLAUDE_CODE_OAUTH_TOKEN` is never set.
 
@@ -580,8 +617,11 @@ public struct Config: Codable, Equatable, Sendable {
     public var claudeAppPath: String
     public var activeProfileId: String
     public var profiles: [Profile]
+    public var reopenAfterUpdate: Bool      // default true; launch-only
+    public var blockClaudeUpdates: Bool     // default false
     public static var configURL: URL { get }              // ~/.config/claude-switcher/config.json
     public static func defaultUserDataDir(home: String = NSHomeDirectory()) -> String   // ~/Library/Application Support/Claude — the one place that name lives
+    public static let policyDirectorySuffix: String       // "-3p": Claude's policy directory for a profile is <user-data dir>-3p
     public static func load() throws -> Config            // defaultConfig() when the file is absent
     public static func load(from url: URL) throws -> Config
     public func save() throws                             // atomic, parent dirs created, mode 0600
@@ -651,7 +691,8 @@ public enum InstanceManager {
     // the pid-reuse guard cannot be skipped. Returns "request sent", not "has quit".
     @discardableResult
     public static func terminate(pid: pid_t, expecting bundleID: String) -> Bool
-    public static func launch(profile: Profile, appPath: String,
+    // activates: false = started in the background; an instance already up is left where it is
+    public static func launch(profile: Profile, appPath: String, activates: Bool = true,
                               completion: @escaping @Sendable (Result<pid_t, Error>) -> Void)
 }
 
@@ -675,6 +716,55 @@ public enum LoginItem {
     // .notFound (never registered) -> .disabled, i.e. registrable; only "not in an .app" is unavailable
     public static func state(for status: SMAppService.Status, runsFromBundle: Bool) -> LoginItemState
     public static func runsFromBundle(_ bundle: Bundle = .main) -> Bool
+}
+
+// ── Sources/ClaudeSwitcherCore/UpdateReopen.swift ────────────────────────────
+public struct UpdateAttempt: Equatable, Sendable { fromVersion: String; toVersion: String?; at: Date }
+
+public enum UpdateAttemptMarker {              // read-only: never written, moved or deleted
+    public static let fileName = "update-attempt"
+    public static func fileURL(forUserDataDir dir: String?, home: String = NSHomeDirectory()) -> URL
+    public static func parse(_ data: Data) -> UpdateAttempt?
+    public static func read(userDataDir: String?, home: String = NSHomeDirectory()) -> UpdateAttempt?
+}
+
+public enum UpdateReopen {
+    public struct Environment: Sendable {      // no terminate member exists
+        public var steps: UpdateInstaller.LaunchOnly
+        public var marker: @MainActor (Profile) -> UpdateAttempt?
+        public var now: @MainActor () -> Date
+        public var bootTime: @MainActor () -> Date?
+        public var claimLaunching: @MainActor () -> Bool
+        public var releaseLaunching: @MainActor () -> Void
+        public static func live(appPath: String, bundleID: String, claimLaunching: …, releaseLaunching: …) -> Environment
+    }
+    public struct Timing: Equatable, Sendable   // blockedGrace 10 s, claimTimeout 60 s, defaultProfileQuietPeriod 15 s, maximumMarkerAge 24 h
+    public struct Reopened: Equatable, Sendable { profile: Profile; attempt: UpdateAttempt }
+    public enum Outcome: Equatable, Sendable {
+        case nothingToDo, blocked, updaterStuck, notInstalled, busy
+        case reopened(AppVersion, [Reopened], notReopened: [Profile])
+    }
+    public static func candidates(profiles:running:markers:installed:now:bootTime:maximumAge:handled:) -> [Profile]
+    @MainActor public static func run(profiles: [Profile], handled: [String: Date] = [:],
+                                      environment: Environment, timing: Timing = Timing()) async -> Outcome
+    public static func systemBootTime() -> Date?   // kern.boottime
+}
+
+// ── Sources/ClaudeSwitcherCore/AutomationLock.swift ──────────────────────────
+public enum AutomationLock {                   // one switcher process acts on its own; the rest stand by
+    public static var defaultURL: URL { get }  // ~/.config/claude-switcher/automation.lock
+    public static func acquire(at url: URL = defaultURL) -> Int32?   // non-blocking flock; nil = do nothing automatic
+    public static func release(_ descriptor: Int32)
+}
+
+// ── Sources/ClaudeSwitcherCore/UpdateBlock.swift ─────────────────────────────
+public enum UpdateBlock {
+    public static let configID: String             // the one configuration this tool owns
+    public enum State: Equatable, Sendable { case off, on, foreign(String), damaged }
+    public static func policyDirectory(forUserDataDir dir: String?, home: String = NSHomeDirectory()) -> URL
+    public static func state(userDataDir: String?, home: String = NSHomeDirectory()) -> State
+    @discardableResult public static func apply(userDataDir: String?, home: String = NSHomeDirectory()) throws -> State   // only from .off / .damaged
+    @discardableResult public static func remove(userDataDir: String?, home: String = NSHomeDirectory()) throws -> State  // only files still exactly ours
 }
 
 // ── Sources/ClaudeSwitcherCore/UsageHistory.swift ────────────────────────────
@@ -761,6 +851,17 @@ public struct UpdatePlan: Equatable, Sendable {
 
 public enum UpdateInstaller {
     public static func plan(running: [RunningInstance], profiles: [Profile]) -> UpdatePlan
+    public static func reopenOrder(_ profiles: [Profile]) -> [Profile]   // named first, default last
+
+    public struct LaunchOnly: Sendable {   // what automatic behaviour is handed: no way to quit
+        public var runningInstances: @MainActor () -> [RunningInstance]
+        public var installedVersion: @MainActor () -> AppVersion?
+        public var updaterIsRunning: @MainActor () -> Bool
+        public var launch: @MainActor (Profile) -> Void
+        public var sleep: @MainActor (Duration) async -> Void
+        public static func live(appPath: String, bundleID: String, activates: Bool) -> LaunchOnly
+    }
+    // on Environment (the confirmed flow's effects):  public var launchOnly: LaunchOnly { get }
 
     public struct Environment: Sendable {  // every effect, injected; tests use a fake
         public var runningInstances: @MainActor () -> [RunningInstance]
@@ -807,5 +908,9 @@ Violating any of these is a critical defect:
 11. **Never** quit a Claude instance except from the explicit, confirmed **Quit All & Install Update…** action, and then only the pids in the snapshot the user confirmed. `NSRunningApplication.terminate()` only — **never** `forceTerminate()`, **never** a signal. `InstanceManager.terminate(pid:expecting:)` is the single call site.
 12. **Never** write, move or delete anything under `~/Library/Caches/<bundle id>.ShipIt`, never edit its request file, and never start `ShipIt`. The update is installed by Claude's installer or not at all.
 13. **Never** fetch usage from the network, and never read a token or cookie to do so. Usage comes only from each profile's own `plan-usage-history.json`, which is read and **never** written, moved or deleted.
+14. Anything the app does **on its own initiative only ever launches a profile**. It never quits one, and the code that runs it is handed effects with no way to quit. Rule 11 has no automatic exception.
+15. **Never** write, move or delete `update-attempt`; never open a profile's `config.json` (it holds a token cache) or `stealth-relaunch`.
+16. The **only** files ever created inside Claude's data area are the two update-block policy files (`<user-data dir>-3p/configLibrary/_meta.json` and `<our id>.json`), and only on the user's toggle. A file is ours only if it is a regular, readable file that says exactly what this tool wrote; **"exists but is not ours" is never treated as "ours but damaged"**. **Never** overwrite, merge into or remove anything else; never follow a symbolic link there; never delete recursively (`unlink` our files, `rmdir` the library); never touch `/Library/Managed Preferences`.
+17. Automatic behaviour runs in **one** switcher process (the holder of the lock in `~/.config/claude-switcher/`), and never when the config failed to load.
 
 </details>

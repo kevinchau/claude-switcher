@@ -61,13 +61,18 @@ private func runDryRun() -> Int32 {
     let update = UpdateProbe.status(appPath: config.claudeAppPath)
     let now = Date()
     var usage: [String: UsageReading] = [:]
+    var updateAttempts: [String: UpdateAttempt] = [:]
+    var updateBlocks: [String: UpdateBlock.State] = [:]
     for profile in config.profiles {
+        updateAttempts[profile.id] = UpdateAttemptMarker.read(userDataDir: profile.userDataDir)
+        updateBlocks[profile.id] = UpdateBlock.state(userDataDir: profile.userDataDir)
         if let samples = UsageHistory.read(userDataDir: profile.userDataDir),
            let reading = UsageReading.make(samples: samples, now: now) {
             usage[profile.id] = reading
         }
     }
-    print(Diagnostics.launchPlan(config: config, running: running, update: update, usage: usage, now: now))
+    print(Diagnostics.launchPlan(config: config, running: running, update: update, usage: usage,
+                                 updateAttempts: updateAttempts, updateBlocks: updateBlocks, now: now))
     return 0
 }
 

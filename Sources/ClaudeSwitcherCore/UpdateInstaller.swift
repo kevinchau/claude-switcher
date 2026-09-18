@@ -33,19 +33,64 @@ public enum UpdateInstaller {
 
     public static func plan(running: [RunningInstance], profiles: [Profile]) -> UpdatePlan {
         let wasRunning = profiles.filter { ProfileMatching.isRunning($0, in: running) }
-        let named = wasRunning.filter { InstanceManager.binding(for: $0) != .defaultProfile }
-        let defaults = wasRunning.filter { InstanceManager.binding(for: $0) == .defaultProfile }
 
         return UpdatePlan(
             quit: running,
-            reopen: named + defaults,
+            reopen: reopenOrder(wasRunning),
             strays: ProfileMatching.unmatched(running, profiles: profiles)
         )
     }
 
+    /// Named profiles first, the default profile last: Claude's installer may reopen the
+    /// default profile itself, and by the time we get to it that is visible.
+    public static func reopenOrder(_ profiles: [Profile]) -> [Profile] {
+        profiles.filter { InstanceManager.binding(for: $0) != .defaultProfile }
+            + profiles.filter { InstanceManager.binding(for: $0) == .defaultProfile }
+    }
+
     // MARK: - Effects
 
-    /// The outside world, as the sequence sees it.
+    /// The effects that can only ever start things. Anything that acts without the user
+    /// having just asked for it is handed this, and nothing more: there is no way to quit an
+    /// instance through it.
+    public struct LaunchOnly: Sendable {
+        public var runningInstances: @MainActor () -> [RunningInstance]
+        public var installedVersion: @MainActor () -> AppVersion?
+        public var updaterIsRunning: @MainActor () -> Bool
+        /// Starts a profile. Fire-and-forget: success is judged by the profile appearing in
+        /// `runningInstances`, because a launch callback is not guaranteed to ever arrive.
+        public var launch: @MainActor (Profile) -> Void
+        public var sleep: @MainActor (Duration) async -> Void
+
+        public init(
+            runningInstances: @escaping @MainActor () -> [RunningInstance],
+            installedVersion: @escaping @MainActor () -> AppVersion?,
+            updaterIsRunning: @escaping @MainActor () -> Bool,
+            launch: @escaping @MainActor (Profile) -> Void,
+            sleep: @escaping @MainActor (Duration) async -> Void
+        ) {
+            self.runningInstances = runningInstances
+            self.installedVersion = installedVersion
+            self.updaterIsRunning = updaterIsRunning
+            self.launch = launch
+            self.sleep = sleep
+        }
+
+        /// The real thing. `activates: false` starts profiles in the background.
+        public static func live(appPath: String, bundleID: String, activates: Bool) -> LaunchOnly {
+            LaunchOnly(
+                runningInstances: { InstanceManager.runningInstances(appPath: appPath) },
+                installedVersion: { UpdateProbe.version(ofBundleAt: PathNormalizer.normalize(appPath)) },
+                updaterIsRunning: { UpdateProbe.isUpdaterRunning(bundleID: bundleID) },
+                launch: { InstanceManager.launch(profile: $0, appPath: appPath, activates: activates) { _ in } },
+                // The tasks running these sequences are never cancelled. If that changes, a
+                // cancelled sleep returns at once and every deadline collapses — handle it first.
+                sleep: { try? await Task.sleep(for: $0) }
+            )
+        }
+    }
+
+    /// The outside world, as the confirmed quit-and-install sequence sees it.
     public struct Environment: Sendable {
         public var runningInstances: @MainActor () -> [RunningInstance]
         /// Asks one instance to quit; returns whether the request was accepted.
@@ -71,6 +116,12 @@ public enum UpdateInstaller {
             self.updaterIsRunning = updaterIsRunning
             self.launch = launch
             self.sleep = sleep
+        }
+
+        /// Everything except the ability to quit.
+        public var launchOnly: LaunchOnly {
+            LaunchOnly(runningInstances: runningInstances, installedVersion: installedVersion,
+                       updaterIsRunning: updaterIsRunning, launch: launch, sleep: sleep)
         }
 
         /// The real thing. `bundleID` is the identifier read from the app at `appPath`.
@@ -175,9 +226,10 @@ public enum UpdateInstaller {
 
         // Nothing is launched until the installer is done.
         onPhase(.installing)
-        guard await installerFinished(since: before, environment, timing) else { return .updaterStuck }
+        let steps = environment.launchOnly
+        guard await installerFinished(since: before, steps, timing) else { return .updaterStuck }
 
-        let notReopened = await reopen(plan.reopen, environment, timing, onPhase)
+        let notReopened = await reopen(plan.reopen, steps, timing, onPhase)
         if let before, let after = environment.installedVersion(), after != before {
             return .installed(after, notReopened: notReopened)
         }
@@ -186,9 +238,9 @@ public enum UpdateInstaller {
 
     /// Waits for the installer to be done. `false` means it was still going at the deadline.
     @MainActor
-    private static func installerFinished(
+    static func installerFinished(
         since before: AppVersion?,
-        _ environment: Environment,
+        _ environment: LaunchOnly,
         _ timing: Timing
     ) async -> Bool {
         var elapsed = Duration.zero
@@ -219,15 +271,22 @@ public enum UpdateInstaller {
     /// Starts each profile that is not already up, one at a time, and returns the ones that
     /// could not be reopened.
     @MainActor
-    private static func reopen(
+    static func reopen(
         _ profiles: [Profile],
-        _ environment: Environment,
+        _ environment: LaunchOnly,
         _ timing: Timing,
-        _ onPhase: @MainActor (Phase) -> Void
+        _ onPhase: @MainActor (Phase) -> Void,
+        whileAllowed mayLaunch: @MainActor () -> Bool = { true }
     ) async -> [Profile] {
         var notReopened: [Profile] = []
 
-        for profile in profiles {
+        for (index, profile) in profiles.enumerated() {
+            // Looked at again before every single launch, not once for the batch.
+            guard mayLaunch() else {
+                notReopened.append(contentsOf: profiles[index...])
+                break
+            }
+
             // An instance we cannot identify might be this very profile — the installer can
             // reopen the default profile itself. Never start a second process on one profile
             // directory: give a fresh process a moment to become readable, else give up.
