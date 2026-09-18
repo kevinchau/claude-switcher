@@ -1,7 +1,7 @@
 import XCTest
 @testable import ClaudeSwitcherCore
 
-/// Rules enforced by `Config.addProfile` / `removeProfile` / `setActive`.
+/// Rules enforced by `Config.addProfile` / `removeProfile` / `renameProfile` / `setActive`.
 /// These are pure value-type mutations — nothing here touches disk, the Keychain,
 /// or launches anything.
 final class ProfileMutationTests: XCTestCase {
@@ -239,6 +239,67 @@ final class ProfileMutationTests: XCTestCase {
                             userDataDir: "/Users/me/Library/Application Support/Claude-Spare",
                             credDir: "/Users/me/.claude-accounts/spare")
         XCTAssertNoThrow(try config.addProfile(reuse))
+    }
+
+    // MARK: - renameProfile
+
+    func testRenameChangesTheLabelAndNothingElse() throws {
+        var config = makeConfig()
+        let before = try XCTUnwrap(config.profile(id: "work"))
+
+        try config.renameProfile(id: "work", label: "Client Work")
+
+        let after = try XCTUnwrap(config.profile(id: "work"))
+        XCTAssertEqual(after.label, "Client Work")
+        XCTAssertEqual(after.id, before.id)
+        XCTAssertEqual(after.userDataDir, before.userDataDir)
+        XCTAssertEqual(after.credDir, before.credDir)
+        XCTAssertEqual(config.activeProfileId, "work")
+        XCTAssertEqual(config.profiles.map(\.id), ["default", "work", "spare"], "order is kept")
+    }
+
+    func testRenameLeavesOtherProfilesUntouched() throws {
+        var config = makeConfig()
+        let others = config.profiles.filter { $0.id != "spare" }
+        try config.renameProfile(id: "spare", label: "Backup")
+        XCTAssertEqual(config.profiles.filter { $0.id != "spare" }, others)
+    }
+
+    func testRenameTrimsSurroundingWhitespace() throws {
+        var config = makeConfig()
+        try config.renameProfile(id: "work", label: "  Client Work \n")
+        XCTAssertEqual(config.profile(id: "work")?.label, "Client Work")
+    }
+
+    func testRenameRejectsAnEmptyOrBlankLabelAndChangesNothing() {
+        var config = makeConfig()
+        let before = config
+        for label in ["", "   ", "\n\t"] {
+            XCTAssertThrowsError(try config.renameProfile(id: "work", label: label)) { error in
+                XCTAssertEqual(error as? ConfigError, .emptyLabel)
+            }
+        }
+        XCTAssertEqual(config, before)
+    }
+
+    func testRenameOfAnUnknownProfileThrowsAndChangesNothing() {
+        var config = makeConfig()
+        let before = config
+        XCTAssertThrowsError(try config.renameProfile(id: "nope", label: "X")) { error in
+            XCTAssertEqual(error as? ConfigError, .unknownProfile("nope"))
+        }
+        XCTAssertEqual(config, before)
+    }
+
+    /// Unlike removal, renaming has no reason to refuse the default or the active profile.
+    func testDefaultAndActiveProfilesCanBeRenamed() throws {
+        var config = makeConfig()
+        try config.renameProfile(id: "default", label: "Me")
+        try config.renameProfile(id: "work", label: "Day Job")
+        XCTAssertEqual(config.profile(id: "default")?.label, "Me")
+        XCTAssertEqual(config.profile(id: "default")?.isDefaultProfile, true)
+        XCTAssertEqual(config.profile(id: "work")?.label, "Day Job")
+        XCTAssertEqual(config.activeProfileId, "work")
     }
 
     // MARK: - setActive

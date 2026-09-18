@@ -9,17 +9,11 @@ enum MenuBuilder {
 
     // MARK: - Inputs
 
-    enum LaunchAtLogin: Sendable {
-        case enabled
-        case disabled
-        case requiresApproval
-        case unavailable
-    }
-
     struct Actions: Sendable {
         var selectProfile: Selector
         var copyTerminalCommand: Selector
         var addProfile: Selector
+        var renameProfile: Selector
         var removeProfile: Selector
         var chooseClaudeApp: Selector
         var revealSharedDirectory: Selector
@@ -38,7 +32,7 @@ enum MenuBuilder {
         var isBusy: Bool
         var configError: String?
         var claudeAppExists: Bool
-        var launchAtLogin: LaunchAtLogin
+        var launchAtLogin: LoginItemState
         /// A downloaded Claude update whose installer is waiting for every instance to quit.
         /// `nil` when nothing is staged, or when no installer is alive to install it.
         var blockedUpdate: StagedUpdate?
@@ -125,6 +119,24 @@ enum MenuBuilder {
         addItem.isEnabled = !input.isBusy
         menu.addItem(addItem)
 
+        // MARK: Rename profile
+        let renameItem = NSMenuItem(title: "Rename Profile", action: nil, keyEquivalent: "")
+        let renameMenu = NSMenu()
+        renameMenu.autoenablesItems = false
+        if input.config.profiles.isEmpty {
+            renameMenu.addItem(informationalItem("No profiles"))
+        }
+        for profile in input.config.profiles {
+            let sub = NSMenuItem(title: profile.label, action: actions.renameProfile, keyEquivalent: "")
+            sub.target = target
+            sub.representedObject = profile.id
+            sub.isEnabled = !input.isBusy
+            sub.toolTip = "Changes only the name shown in this menu. Directories, sign-ins and the profile id stay as they are."
+            renameMenu.addItem(sub)
+        }
+        renameItem.submenu = renameMenu
+        menu.addItem(renameItem)
+
         // MARK: Remove profile
         let removeItem = NSMenuItem(title: "Remove Profile", action: nil, keyEquivalent: "")
         let removeMenu = NSMenu()
@@ -188,7 +200,7 @@ enum MenuBuilder {
         case .unavailable:
             loginItem.state = .off
             loginItem.isEnabled = false
-            loginItem.toolTip = "Available once claude-switcher is installed as an app bundle."
+            loginItem.toolTip = "Only an installed app bundle can open at login \u{2014} not a bare `swift run` binary."
         }
         menu.addItem(loginItem)
 

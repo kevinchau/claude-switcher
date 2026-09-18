@@ -4,7 +4,8 @@ import PackageDescription
 // Layout note for contributors:
 //   Sources/ClaudeSwitcherCore  -> pure, testable logic (Config, PathNormalizer,
 //                                  KeychainProbe, ProcessArgs, InstanceManager,
-//                                  LaunchPlanning, UpdateProbe, UpdateInstaller)
+//                                  LaunchPlanning, UpdateProbe, UpdateInstaller,
+//                                  LoginItem)
 //   Sources/ClaudeSwitcher      -> AppKit UI shell (main.swift, AppDelegate,
 //                                  MenuBuilder, Diagnostics)
 //   Tests/ClaudeSwitcherTests   -> tests, importing ClaudeSwitcherCore

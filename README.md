@@ -67,6 +67,7 @@ Running: Personal
 ──────────────────────────────
 Copy terminal command            ▸
 Add Profile…
+Rename Profile                   ▸
 Remove Profile                   ▸
 ──────────────────────────────
 Choose Claude.app…
@@ -190,14 +191,14 @@ The menu is rebuilt on every open so running state is fresh.
 
   `terminal: unknown` is what you see before the background Keychain probe reports — the menu is built from a cached snapshot and never blocks on a `security` call, so a first open can show it briefly; the hints are then patched in place rather than rebuilding the menu under the cursor. Note that the probe reports **failure the same as genuine absence**: `KeychainProbe.isSignedIn` returns `false` on any thrown error, timeout or non-zero exit, so `terminal: no credentials found` means "no credential item was found", not necessarily "you are not signed in". **The hint describes the terminal CLI only** — the Desktop login is separate and is not something the tool can inspect.
 - **Copy terminal command** — one item per profile (see [Terminal](#terminal) above).
-- **Add Profile…**, and **Remove Profile** (disabled for the default profile and for the active profile; confirms first; **never deletes the profile's data directories**, and says so in the dialog).
+- **Add Profile…**, **Rename Profile** (one item per profile; changes only the label shown in the menu — the id, both directories and therefore the Keychain service name stay exactly as they are), and **Remove Profile** (disabled for the default profile and for the active profile; confirms first; **never deletes the profile's data directories**, and says so in the dialog).
 - **Choose Claude.app…** — an `NSOpenPanel`, offered when the configured path is missing or on request.
 - **Reveal ~/.claude in Finder**.
 - **Diagnostics** — a selectable-text alert with: the config path; the resolved `Claude.app` path, its `CFBundleIdentifier` and version, any staged update and whether Claude's installer is running; the shared config dir (`~/.claude`) and confirmation that `CLAUDE_CONFIG_DIR` is unset; each profile with its normalized directories, derived Keychain service name and running pid; and the `claude` CLI version for both the `PATH` binary and the app-managed sidecar if present.
-- **Launch at Login** — a checkbox bound to `SMAppService.mainApp`, reflecting `.status`.
+- **Launch at Login** — a checkbox bound to `SMAppService.mainApp`, reflecting `.status`. A bundle that has never been registered reports `.notFound`, which is *not* an error: it is shown as an unchecked box and clicking it registers. The item is greyed out only when the process is not inside an `.app` bundle (`swift run`), where there is nothing launchd could register.
 - **Quit**.
 
-Launches are serialized, but only the items that could start a second one are gated on the in-flight flag: **the profile rows, Add Profile… and the Remove Profile submenu** go disabled while a launch is in flight and re-enable on completion (a 30-second watchdog re-enables them if a completion handler never arrives). **Copy terminal command, Choose Claude.app…, Reveal ~/.claude, Diagnostics…, Launch at Login and Quit stay enabled throughout.** The profile rows additionally require the configured `Claude.app` to exist.
+Launches are serialized, but only the items that could start a second one are gated on the in-flight flag: **the profile rows, Add Profile…, the Rename Profile submenu and the Remove Profile submenu** go disabled while a launch is in flight and re-enable on completion (a 30-second watchdog re-enables them if a completion handler never arrives). **Copy terminal command, Choose Claude.app…, Reveal ~/.claude, Diagnostics…, Launch at Login and Quit stay enabled throughout.** The profile rows additionally require the configured `Claude.app` to exist.
 
 An update install holds the same flag from confirmation until the last profile is back, and additionally disables **Choose Claude.app…** and **Quit** — quitting the switcher mid-install would leave every profile closed with nothing to reopen it.
 
@@ -410,7 +411,7 @@ make clean      # rm -rf .build build
 make dry-run    # swift run -c release claude-switcher --dry-run
 ```
 
-`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.2.0`. No Xcode project is involved.
+`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.3.0`. No Xcode project is involved.
 
 ### Layout
 
@@ -418,7 +419,7 @@ A SwiftPM package (`swift-tools-version:6.0`, every target compiled with `.swift
 
 | Target | Path | What it is |
 | --- | --- | --- |
-| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning`, `UpdateProbe`, `UpdateInstaller` |
+| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning`, `UpdateProbe`, `UpdateInstaller`, `LoginItem` |
 | `claude-switcher` (executable) | `Sources/ClaudeSwitcher` | Thin AppKit shell: `main.swift`, `AppDelegate`, `MenuBuilder`, `Diagnostics` |
 | `ClaudeSwitcherTests` | `Tests/ClaudeSwitcherTests` | Tests, importing `ClaudeSwitcherCore` |
 
@@ -426,7 +427,7 @@ The split is deliberate: a test target cannot import an executable target cleanl
 
 ### Tests
 
-`make test` runs **142 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
+`make test` runs **152 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
 
 ### `--dry-run` and `--help`
 
@@ -460,7 +461,7 @@ Written atomically with mode `0600` (parent directories created as needed). If t
 | `claudeAppPath` | Path to the `Claude.app` bundle. Never modified or duplicated; only read. |
 | `activeProfileId` | The profile last selected. Must name an existing profile. |
 | `profiles[].id` | Unique, non-empty. |
-| `profiles[].label` | Menu title. |
+| `profiles[].label` | Menu title. Change it with **Rename Profile**; nothing else about the profile changes. |
 | `profiles[].userDataDir` | `null` ⇒ the app's own default profile dir; **pass no `--user-data-dir` argument**. Otherwise the Electron profile dir, created (`mkdir -p`) at launch if missing. |
 | `profiles[].credDir` | `null` ⇒ the default credential slot; **omit `CLAUDE_SECURESTORAGE_CONFIG_DIR` entirely**. Otherwise the terminal CLI's credential dir. |
 
@@ -552,6 +553,7 @@ public enum ConfigError: Error, LocalizedError, Equatable, Sendable {
     case cannotRemoveActiveProfile(String)
     case duplicateUserDataDir(String)
     case duplicateCredDir(String)
+    case emptyLabel
     case malformed(String)
 }
 
@@ -571,6 +573,7 @@ public struct Config: Codable, Equatable, Sendable {
 extension Config {                                        // pure; nothing here touches disk
     public mutating func addProfile(_ p: Profile) throws
     public mutating func removeProfile(id: String) throws
+    public mutating func renameProfile(id: String, label: String) throws   // label only; trims; emptyLabel
     public mutating func setActive(id: String) throws
 }
 
@@ -643,6 +646,15 @@ public enum LaunchPlanning {
     public static func launchArguments(for profile: Profile) -> [String]   // [] for the default profile
     public static func terminalCommand(for profile: Profile) -> String     // "claude" for the default slot
     public static func shellQuoted(_ value: String) -> String
+}
+
+// ── Sources/ClaudeSwitcherCore/LoginItem.swift ───────────────────────────────
+public enum LoginItemState: Equatable, Sendable { case enabled, disabled, requiresApproval, unavailable }
+
+public enum LoginItem {
+    // .notFound (never registered) -> .disabled, i.e. registrable; only "not in an .app" is unavailable
+    public static func state(for status: SMAppService.Status, runsFromBundle: Bool) -> LoginItemState
+    public static func runsFromBundle(_ bundle: Bundle = .main) -> Bool
 }
 
 // ── Sources/ClaudeSwitcherCore/StagedUpdate.swift ────────────────────────────

@@ -91,6 +91,8 @@ public enum ConfigError: Error, LocalizedError, Equatable, Sendable {
     case duplicateUserDataDir(String)
     /// Another profile already points at this credential directory.
     case duplicateCredDir(String)
+    /// A profile label with nothing in it.
+    case emptyLabel
     /// The config file could not be read or understood.
     case malformed(String)
 
@@ -112,6 +114,8 @@ public enum ConfigError: Error, LocalizedError, Equatable, Sendable {
             return "Another profile already uses the application data directory \(dir)."
         case .duplicateCredDir(let dir):
             return "Another profile already uses the credential directory \(dir)."
+        case .emptyLabel:
+            return "A profile needs a name."
         case .malformed(let detail):
             return "The configuration file is not valid: \(detail)"
         }
@@ -419,6 +423,23 @@ extension Config {
             throw ConfigError.cannotRemoveActiveProfile(id)
         }
         profiles.removeAll { $0.id == id }
+    }
+
+    /// Changes a profile's menu label and nothing else.
+    ///
+    /// The id, the Desktop profile directory and the credential directory are identity —
+    /// the id names both directories and the credential directory feeds the Keychain
+    /// service name — so they are never touched. Surrounding whitespace is trimmed.
+    ///
+    /// - Throws: ``ConfigError/unknownProfile(_:)`` when no such profile exists, or
+    ///   ``ConfigError/emptyLabel`` when the trimmed label is empty.
+    public mutating func renameProfile(id: String, label: String) throws {
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
+            throw ConfigError.unknownProfile(id)
+        }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw ConfigError.emptyLabel }
+        profiles[index].label = trimmed
     }
 
     /// Marks a profile as the active one.

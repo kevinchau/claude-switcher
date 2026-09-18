@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         selectProfile: #selector(selectProfile(_:)),
         copyTerminalCommand: #selector(copyTerminalCommand(_:)),
         addProfile: #selector(addProfile(_:)),
+        renameProfile: #selector(renameProfile(_:)),
         removeProfile: #selector(removeProfile(_:)),
         chooseClaudeApp: #selector(chooseClaudeApp(_:)),
         revealSharedDirectory: #selector(revealSharedDirectory(_:)),
@@ -381,6 +382,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         beginLaunch(profile)
     }
 
+    /// Label only. The id and both directories are the profile's identity and never change.
+    @objc private func renameProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let profile = config.profile(id: id) else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Rename \u{201C}\(profile.label)\u{201D}"
+        alert.informativeText = "Only the name in the menu changes. The profile keeps its directories, its sign-ins and its id (\(profile.id))."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = profile.label
+        field.placeholderString = profile.label
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+
+        guard runModal(alert) == .alertFirstButtonReturn else { return }
+        let label = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty, label != profile.label else { return }
+
+        do {
+            try config.renameProfile(id: id, label: label)
+        } catch {
+            presentAlert(style: .warning, title: "Could not rename \u{201C}\(profile.label)\u{201D}", message: error.localizedDescription)
+            return
+        }
+        saveConfig(failureTitle: "Could not save the new name")
+    }
+
     @objc private func removeProfile(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
               let profile = config.profile(id: id) else { return }
@@ -684,14 +714,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Actions: launch at login
 
-    private func launchAtLoginState() -> MenuBuilder.LaunchAtLogin {
-        switch SMAppService.mainApp.status {
-        case .enabled: return .enabled
-        case .requiresApproval: return .requiresApproval
-        case .notFound: return .unavailable
-        case .notRegistered: return .disabled
-        @unknown default: return .disabled
-        }
+    private func launchAtLoginState() -> LoginItemState {
+        LoginItem.state(for: SMAppService.mainApp.status, runsFromBundle: LoginItem.runsFromBundle())
     }
 
     @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
@@ -706,7 +730,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             presentAlert(
                 style: .warning,
                 title: "Could not change Launch at Login",
-                message: "\(error.localizedDescription)\n\nLogin items require claude-switcher to be installed as an app bundle."
+                message: "\(error.localizedDescription)\n\nLogin items require Claude Switcher to be installed as an app bundle, e.g. in /Applications."
             )
             return
         }
