@@ -92,7 +92,7 @@ enum MenuBuilder {
             item.toolTip = profileToolTip(profile, input: input)
             menu.addItem(item)
             if let reading = input.usage[profile.id], !reading.rows.isEmpty {
-                menu.addItem(usageItem(for: profile, reading: reading))
+                menu.addItem(usageItem(for: profile, reading: reading, now: input.now))
             }
         }
         if !input.config.profiles.isEmpty {
@@ -231,14 +231,28 @@ enum MenuBuilder {
         return formatter
     }()
 
+    /// "Sat 10:09 PM" — for moments on another day, such as the weekly reset.
+    private static let dayTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("EEE jmm")
+        return formatter
+    }()
+
+    /// A clock time, with the weekday when it is not today.
+    static func clock(_ date: Date, now: Date) -> String {
+        Calendar.current.isDate(date, inSameDayAs: now)
+            ? timeFormatter.string(from: date)
+            : dayTimeFormatter.string(from: date)
+    }
+
     static func usageItemIdentifier(_ profileID: String) -> NSUserInterfaceItemIdentifier {
         NSUserInterfaceItemIdentifier("claude-switcher.usage.\(profileID)")
     }
 
     /// The drawn usage rows under a profile. A view item never draws its title, so the title
     /// carries the sentence VoiceOver reads; the view itself is not an accessibility element.
-    static func usageItem(for profile: Profile, reading: UsageReading) -> NSMenuItem {
-        let time: (Date) -> String = { timeFormatter.string(from: $0) }
+    static func usageItem(for profile: Profile, reading: UsageReading, now: Date) -> NSMenuItem {
+        let time: (Date) -> String = { clock($0, now: now) }
         let rows = reading.rows.map { row in
             UsageBarView.Row(
                 label: row.label,

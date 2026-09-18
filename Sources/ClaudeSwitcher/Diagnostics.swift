@@ -101,11 +101,15 @@ public enum Diagnostics {
         return what + " — cannot install until every instance quits (\(runningCount) running)"
     }
 
-    /// Clock times in reports, in the user's locale.
+    /// Clock times in reports, in the user's locale, with the weekday when not today.
     static func clockTime(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
+        if Calendar.current.isDateInToday(date) {
+            formatter.dateStyle = .none
+            formatter.timeStyle = .short
+        } else {
+            formatter.setLocalizedDateFormatFromTemplate("EEE jmm")
+        }
         return formatter.string(from: date)
     }
 

@@ -61,8 +61,8 @@ under each account that has run, its usage bars (see [§2.10](#210-where-the-usa
 Running: Personal
 ──────────────────────────────
 ✓ Personal            terminal: signed in
-    5h    ▰▰▱▱▱▱▱▱▱▱   22%   resets by 9:13 PM
-    week  ▰▰▰▰▰▰▰▰▰▱   92%   2 h ago
+    5h    ▰▰▱▱▱▱▱▱▱▱   22%   resets by 9:13 PM (est.)
+    week  ▰▰▰▰▰▰▰▰▰▱   92%   resets by Sat 10:09 PM (est.) · 2 h ago
   Work                terminal: no credentials found
   Open Source         terminal: no credentials found
 "terminal:" is the claude CLI sign-in only — not the Claude app.
@@ -183,7 +183,7 @@ The menu is rebuilt on every open so running state is fresh.
 
 - A disabled header: `Running: Personal, Work` — or `Claude is not running`.
 - **Quit All & Install Update…**, under a disabled line naming the version — shown only while Claude has an update downloaded, its installer is alive and waiting, and at least one instance is running (see [§2.9](#29-updates-need-every-instance-to-quit)). It confirms first, naming the profiles it will quit and reopen and any unrecognized instances it will quit and *not* reopen. It then asks every instance to quit (the same as ⌘Q — never forced), waits for Claude's own installer to finish, and reopens the profiles that were running; if an instance will not quit, nothing is reopened and it says which profiles are closed. While it runs, a progress line replaces the offer. **This is the only thing in the app that ever quits Claude, and it never happens on its own.**
-- Under each profile that has ever run, its **usage bars**: one drawn row per limit Claude reports for that account — `5h` (the five-hour session) and `week`, plus `Opus`, `Sonnet`, `Cowork`, `apps` or `extra` when the account has those — with the percentage, a bar that turns orange at 80 % and red at 100 %, and a note: the session row says when the window ends ("resets by 9:13 PM", a certain upper bound), the week row says how old the reading is. A dash means the period has certainly ended since the reading. Hover for the full picture. Read from the profile's own `plan-usage-history.json`, never fetched — [§2.10](#210-where-the-usage-bars-come-from).
+- Under each profile that has ever run, its **usage bars**: one drawn row per limit Claude reports for that account — `5h` (the five-hour session) and `week`, plus `Opus`, `Sonnet`, `Cowork`, `apps` or `extra` when the account has those — with the percentage, a bar that turns orange at 80 % and red at 100 %, and a note: the session row says when the window ends ("resets by 9:13 PM (est.)"), the week row says when the week resets ("resets by Sat 10:09 PM (est.)", once a reset has been observed) and how old the reading is. Both times are marked estimated: Claude does not record the exact reset time locally, so they are inferred from the profile's history — each is the latest the reset can be, worked out as [§2.10](#210-where-the-usage-bars-come-from) describes. A dash means the period has certainly ended since the reading. Hover for the full picture. Read from the profile's own `plan-usage-history.json`, never fetched — [§2.10](#210-where-the-usage-bars-come-from).
 - One item per profile: the label, a checkmark when an instance for that profile is running, and a badge hint about the terminal CLI. The hint has **three** states, from `MenuBuilder.hintText`:
 
   | probe result | hint |
@@ -344,7 +344,7 @@ The switcher reads that file when the menu opens and shows the latest sample of 
 - **Freshness.** The app records only while that profile is open, so a closed profile's reading is its last observation. Weekly usage only rises until the reset, so a stale value is a floor; the week row carries the reading's age once it is over 30 minutes old, and reads "—" once it is a week old. Usage from claude.ai or the phone on the same account shows up only the next time that profile is open.
 - **The session window's end is a certain bound, not a guess.** Inside one five-hour window utilization never decreases and the window is five hours long, so the longest trailing run of non-decreasing `fh` samples spanning under five hours lies within one window. The window was already running at that run's first positive sample, so it ends *no later than* five hours after it — that is the "resets by" shown. The sample before the run (a drop, or one five hours older) belongs to an earlier window, so it ends *no earlier than* five hours after that — the tooltip shows both bounds. While a profile is open the interval is about one sampling gap wide; after an idle stretch it is wider, and the row still only ever claims the safe end. Once "resets by" has passed the row shows "—": a new window may have started on another device, unseen. A `0` sample is treated as an ordinary member of a run, because the histories on this Mac show windows that had already started before a sample that still read 0.
 
-No weekly reset is inferred. The obvious rule — last drop plus seven days — was checked against a real history and would have been wrong twice: that account's weekly figure dropped to zero on the 1st, 4th, 5th and 12th of the month.
+- **The weekly reset is a schedule, and the bound tightens over time.** The weekly limit resets at the same weekday and time every week (re-anchored only when the plan changes). Every observed drop in the weekly figure brackets one reset between two consecutive samples, and since the schedule repeats, the brackets of earlier weeks are the same moment shifted by whole weeks: where they agree they are intersected, so the longer the app has been open around reset time, the narrower the "resets by" on the week row. A bracket that does not line up with the latest one is a re-anchoring and is ignored; a bracket a week or wider says nothing and is skipped. Once a scheduled reset has certainly fallen between the reading and now, the row shows "—". A profile that has never been open across a reset shows no weekly reset yet — its first observed one starts the schedule.
 
 The file is only ever read. Nothing is written, moved or deleted, nothing is fetched, and no token or cookie is touched for this. If a Claude update changes the format, the bars disappear rather than mislead.
 
@@ -429,7 +429,7 @@ make clean      # rm -rf .build build
 make dry-run    # swift run -c release claude-switcher --dry-run
 ```
 
-`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.4.0`. No Xcode project is involved.
+`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.5.0`. No Xcode project is involved.
 
 ### Layout
 
@@ -445,7 +445,7 @@ The split is deliberate: a test target cannot import an executable target cleanl
 
 ### Tests
 
-`make test` runs **187 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, usage-history parsing and session-window inference (including series shaped like the real ones), staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
+`make test` runs **194 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, usage-history parsing and session-window inference (including series shaped like the real ones), staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
 
 ### `--dry-run` and `--help`
 
@@ -524,7 +524,7 @@ Checked again at **load** time (`Config.init(from:)`), since the file is hand-ed
 - **The tool never reads, writes or migrates credentials.** Each account is signed in by you, interactively, once. Keychain interaction is an existence check with `security find-generic-password -s <service> -a "$USER"` and never `-w`; any failure is indistinguishable from a genuine absence and is reported the same way (see the hint table under [Usage](#usage)). `CLAUDE_CODE_OAUTH_TOKEN` is never set by this tool.
 - **The "terminal: signed in" hint is about the CLI only.** It says nothing about whether the Desktop profile is logged in.
 - **Claude cannot update itself while two profiles are open.** Its installer waits for every instance to quit, so a profile that quits itself to be updated stays closed until the rest do too ([§2.9](#29-updates-need-every-instance-to-quit)). The menu says when this is happening and offers **Quit All & Install Update…**; using it interrupts whatever Claude is doing in every profile, like any quit. Detection reads Squirrel's internal files, so a Claude update may break it — in which case the menu simply stops mentioning updates, and quitting every profile by hand still works.
-- **Usage bars are the app's own last observation, not a live figure.** They come from a file Claude Desktop writes for itself ([§2.10](#210-where-the-usage-bars-come-from)); it is undocumented, it is updated only while that profile is open, and the session "resets by" time is an inferred upper bound. A dash means the reading is certainly out of date.
+- **Usage bars are the app's own last observation, not a live figure.** They come from a file Claude Desktop writes for itself ([§2.10](#210-where-the-usage-bars-come-from)); it is undocumented, it is updated only while that profile is open, and the "resets by" times are inferred upper bounds — the session's from its rolling five-hour window, the week's from the fixed weekly schedule observed in the history. A dash means the reading is certainly out of date.
 - **Removing a profile never deletes its data.** The Electron profile dir and credential dir are left on disk; delete them yourself if you want them gone.
 
 ---
@@ -696,6 +696,13 @@ public struct SessionWindow: Equatable, Sendable {   // certain bounds, not esti
     public static func infer(from samples: [UsageSample]) -> SessionWindow?
 }
 
+public struct WeeklyReset: Equatable, Sendable {     // a fixed weekly schedule, bracketed by observed drops
+    public static let period: TimeInterval           // 7 d
+    public let resetsAfter: Date, resetsBy: Date     // certain under the schedule; earlier weeks narrow it
+    public static func infer(from samples: [UsageSample], now: Date) -> WeeklyReset?
+    public func hasCertainlyReset(since sampledAt: Date, now: Date) -> Bool
+}
+
 public enum UsageLevel: Equatable, Sendable { case normal, warning, limit   // < 80, 80…99, ≥ 100
     public static func of(_ percent: Int) -> UsageLevel }
 
@@ -703,7 +710,7 @@ public struct UsageReading: Equatable, Sendable {
     public enum Value: Equatable, Sendable { case percent(Int), ended }
     public struct Row: Equatable, Sendable { key: String; label: String; value: Value }
     public static let rowTable: [(key: String, label: String)]   // fh 5h, sd week, so Opus, sn Sonnet, cw Cowork, oa apps, xu extra
-    public let sampledAt: Date, age: TimeInterval, rows: [Row], session: SessionWindow?, unlisted: [String: Int]
+    public let sampledAt: Date, age: TimeInterval, rows: [Row], session: SessionWindow?, weekly: WeeklyReset?, unlisted: [String: Int]
     public static func make(samples: [UsageSample], now: Date) -> UsageReading?
 }
 

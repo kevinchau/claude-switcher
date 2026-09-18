@@ -141,6 +141,81 @@ public struct SessionWindow: Equatable, Sendable {
     }
 }
 
+/// When the weekly limit next resets, with the earliest and latest moments it can happen.
+///
+/// The weekly limit resets on a fixed schedule — the same weekday and time every week,
+/// re-anchored only when the plan changes. Every observed drop in the weekly figure brackets
+/// one reset between two consecutive samples; because the schedule repeats, the brackets of
+/// earlier weeks are the same moment shifted by whole weeks, and intersecting them narrows
+/// the bound the longer the app has been around at reset time. Both bounds are certain under
+/// that schedule; an early reset by Anthropic would only make the real one sooner, and the
+/// next sample re-anchors.
+public struct WeeklyReset: Equatable, Sendable {
+    public static let period: TimeInterval = 7 * 86400
+    public static let key = "sd"
+
+    /// The reset happens strictly after this.
+    public let resetsAfter: Date
+    /// The reset happens no later than this.
+    public let resetsBy: Date
+
+    public init(resetsAfter: Date, resetsBy: Date) {
+        self.resetsAfter = resetsAfter
+        self.resetsBy = resetsBy
+    }
+
+    /// The next reset after `now`, or `nil` when no reset has been observed yet (a profile
+    /// that has not been open across one).
+    public static func infer(from samples: [UsageSample], now: Date) -> WeeklyReset? {
+        let readings = samples.compactMap { sample -> (at: Date, value: Int)? in
+            guard let value = sample.utilization[key] else { return nil }
+            return (sample.sampledAt, value)
+        }
+        // Each drop brackets a reset: after the sample before it, by the sample itself. A
+        // bracket a week or wider says nothing about the schedule and is skipped.
+        var brackets: [(after: Date, by: Date)] = []
+        for index in 1..<max(1, readings.count) where readings[index].value < readings[index - 1].value {
+            let bracket = (after: readings[index - 1].at, by: readings[index].at)
+            if bracket.by.timeIntervalSince(bracket.after) < period { brackets.append(bracket) }
+        }
+        guard let anchor = brackets.last else { return nil }
+
+        // Earlier brackets are the same moment shifted by whole weeks. Where a shifted one
+        // overlaps the anchor it narrows it; where it does not, the schedule had been
+        // re-anchored since, and it is ignored.
+        var after = anchor.after
+        var by = anchor.by
+        for bracket in brackets.dropLast() {
+            let weeks = (anchor.after.timeIntervalSince(bracket.after) / period).rounded()
+            let shiftedAfter = bracket.after.addingTimeInterval(weeks * period)
+            let shiftedBy = bracket.by.addingTimeInterval(weeks * period)
+            guard shiftedAfter < by, shiftedBy > after else { continue }
+            after = max(after, shiftedAfter)
+            by = min(by, shiftedBy)
+        }
+
+        // Move forward to the first occurrence that has not certainly happened yet.
+        while by <= now {
+            after = after.addingTimeInterval(period)
+            by = by.addingTimeInterval(period)
+        }
+        return WeeklyReset(resetsAfter: after, resetsBy: by)
+    }
+
+    /// Whether a reset has certainly happened between `sampledAt` and `now`: some occurrence
+    /// of the schedule lies wholly inside that span.
+    public func hasCertainlyReset(since sampledAt: Date, now: Date) -> Bool {
+        // Walk back from the next occurrence to the first one that could follow the sample.
+        var after = resetsAfter
+        var by = resetsBy
+        while after.addingTimeInterval(-Self.period) >= sampledAt {
+            after = after.addingTimeInterval(-Self.period)
+            by = by.addingTimeInterval(-Self.period)
+        }
+        return after >= sampledAt && by <= now
+    }
+}
+
 /// How close to a limit a percentage is; drives the bar colour.
 public enum UsageLevel: Equatable, Sendable {
     case normal
@@ -188,14 +263,17 @@ public struct UsageReading: Equatable, Sendable {
     public let rows: [Row]
     /// Present whenever the latest session value is above 0 — even once the window has ended.
     public let session: SessionWindow?
+    /// The next weekly reset, once one has been observed.
+    public let weekly: WeeklyReset?
     /// Values the latest sample carried that get no bar.
     public let unlisted: [String: Int]
 
-    public init(sampledAt: Date, age: TimeInterval, rows: [Row], session: SessionWindow?, unlisted: [String: Int]) {
+    public init(sampledAt: Date, age: TimeInterval, rows: [Row], session: SessionWindow?, weekly: WeeklyReset? = nil, unlisted: [String: Int]) {
         self.sampledAt = sampledAt
         self.age = age
         self.rows = rows
         self.session = session
+        self.weekly = weekly
         self.unlisted = unlisted
     }
 
@@ -205,6 +283,7 @@ public struct UsageReading: Equatable, Sendable {
         guard let latest = samples.last else { return nil }
         let age = now.timeIntervalSince(latest.sampledAt)
         let session = SessionWindow.infer(from: samples)
+        let weekly = WeeklyReset.infer(from: samples, now: now)
 
         var rows: [Row] = []
         var unlisted = latest.utilization
@@ -215,12 +294,14 @@ public struct UsageReading: Equatable, Sendable {
                 value = .ended
             } else if weeklyKeys.contains(key), age >= weeklyLength {
                 value = .ended
+            } else if weeklyKeys.contains(key), let weekly, weekly.hasCertainlyReset(since: latest.sampledAt, now: now) {
+                value = .ended
             } else {
                 value = .percent(percent)
             }
             rows.append(Row(key: key, label: label, value: value))
         }
-        return UsageReading(sampledAt: latest.sampledAt, age: age, rows: rows, session: session, unlisted: unlisted)
+        return UsageReading(sampledAt: latest.sampledAt, age: age, rows: rows, session: session, weekly: weekly, unlisted: unlisted)
     }
 }
 
@@ -251,9 +332,12 @@ public enum UsageText {
         switch row.key {
         case SessionWindow.key:
             guard let session = reading.session, row.percent != nil else { return nil }
-            return "resets by \(time(session.resetsBy))"
-        case "sd":
-            return age(reading.age)
+            return "resets by \(time(session.resetsBy)) (est.)"
+        case WeeklyReset.key:
+            var parts: [String] = []
+            if let weekly = reading.weekly, row.percent != nil { parts.append("resets by \(time(weekly.resetsBy)) (est.)") }
+            if let age = age(reading.age) { parts.append(age) }
+            return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
         default:
             return nil
         }
@@ -264,7 +348,7 @@ public enum UsageText {
         lines.append(reading.rows.map(UsageText.row).joined(separator: "  \u{00B7}  "))
         if let session = reading.session {
             if reading.rows.contains(where: { $0.key == SessionWindow.key && $0.percent != nil }) {
-                lines.append("The 5-hour window ends between \(time(session.resetsAfter)) and \(time(session.resetsBy)).")
+                lines.append("Estimated: the 5-hour window ends between \(time(session.resetsAfter)) and \(time(session.resetsBy)).")
             } else {
                 lines.append("The 5-hour window seen at \(time(reading.sampledAt)) has ended; nothing has been recorded since.")
             }
@@ -273,6 +357,14 @@ public enum UsageText {
             let extras = reading.unlisted.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)%" }
             lines.append("Also reported: \(extras.joined(separator: ", ")).")
         }
+        if let weekly = reading.weekly {
+            if reading.rows.contains(where: { $0.key == WeeklyReset.key && $0.percent != nil }) {
+                lines.append("Estimated: the week resets between \(time(weekly.resetsAfter)) and \(time(weekly.resetsBy)) — at the same time every week.")
+            } else if reading.rows.contains(where: { $0.key == WeeklyReset.key }) {
+                lines.append("The week has reset since this was recorded; the next reset is estimated by \(time(weekly.resetsBy)).")
+            }
+        }
+        lines.append("Reset times are estimated from this profile's own history; the exact time is not recorded locally.")
         lines.append("Last recorded \(time(reading.sampledAt))\(age(reading.age).map { " (\($0))" } ?? ""). Claude Desktop records usage only while this profile is open, so use from claude.ai or your phone on this account shows up only then.")
         return lines.joined(separator: "\n")
     }
@@ -286,7 +378,10 @@ public enum UsageText {
             }
         }
         if let session = reading.session, reading.rows.contains(where: { $0.key == SessionWindow.key && $0.percent != nil }) {
-            parts.append("resets by \(time(session.resetsBy))")
+            parts.append("estimated reset by \(time(session.resetsBy))")
+        }
+        if let weekly = reading.weekly, reading.rows.contains(where: { $0.key == WeeklyReset.key && $0.percent != nil }) {
+            parts.append("estimated week reset by \(time(weekly.resetsBy))")
         }
         if let age = age(reading.age) { parts.append(age) }
         return "\(profileLabel) usage: \(parts.joined(separator: ", "))"
@@ -297,7 +392,10 @@ public enum UsageText {
         guard let reading else { return "no data yet (recorded once Claude has run on this profile)" }
         var parts = reading.rows.map(UsageText.row)
         if let session = reading.session, reading.rows.contains(where: { $0.key == SessionWindow.key && $0.percent != nil }) {
-            parts.append("resets by \(time(session.resetsBy))")
+            parts.append("resets by \(time(session.resetsBy)) (est.)")
+        }
+        if let weekly = reading.weekly, reading.rows.contains(where: { $0.key == WeeklyReset.key && $0.percent != nil }) {
+            parts.append("week resets by \(time(weekly.resetsBy)) (est.)")
         }
         parts.append("recorded \(time(reading.sampledAt))\(age(reading.age).map { " (\($0))" } ?? "")")
         return parts.joined(separator: " \u{00B7} ")

@@ -205,6 +205,80 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(window.resetsBy, at(300))
     }
 
+    // MARK: - Weekly reset (a fixed weekly schedule)
+
+    private let day: Double = 24 * 60
+
+    func testNoObservedDropMeansNoWeeklyReset() {
+        XCTAssertNil(WeeklyReset.infer(from: [sample(0, sd: 10), sample(day, sd: 40)], now: at(2 * day)))
+    }
+
+    /// A drop between two samples brackets one reset; the schedule repeats, so the next
+    /// reset is that bracket moved forward by whole weeks until it is still ahead of now.
+    func testADropBracketsTheResetAndRepeatsWeekly() throws {
+        let series = [sample(0, sd: 60), sample(3 * 60, sd: 2)]        // reset between +0 and +3 h
+        let soon = try XCTUnwrap(WeeklyReset.infer(from: series, now: at(60)))
+        XCTAssertEqual(soon.resetsAfter, at(0))
+        XCTAssertEqual(soon.resetsBy, at(3 * 60), "now is inside the bracket: this occurrence may not have happened yet")
+        let later = try XCTUnwrap(WeeklyReset.infer(from: series, now: at(6 * day)))
+        XCTAssertEqual(later.resetsAfter, at(7 * day))
+        XCTAssertEqual(later.resetsBy, at(7 * day + 3 * 60))
+        let muchLater = try XCTUnwrap(WeeklyReset.infer(from: series, now: at(20 * day)))
+        XCTAssertEqual(muchLater.resetsBy, at(21 * day + 3 * 60), "day 7 and day 14 have passed; day 21 is next")
+    }
+
+    /// Personal, week over week: a tight bracket one week and a wide one the next intersect
+    /// to the tight one. The bound gets better the longer the app is around at reset time.
+    func testEarlierWeeksNarrowTheBracketWhenTheyAgree() throws {
+        let series = [
+            sample(0, sd: 80), sample(15, sd: 1),                           // week 1: reset in (+0, +15 min]
+            sample(7 * day - 6 * 60, sd: 70), sample(7 * day + 4 * 60, sd: 3), // week 2: (−6 h, +4 h] around the same moment
+        ]
+        let reset = try XCTUnwrap(WeeklyReset.infer(from: series, now: at(8 * day)))
+        XCTAssertEqual(reset.resetsAfter, at(14 * day))
+        XCTAssertEqual(reset.resetsBy, at(14 * day + 15))
+    }
+
+    /// An early drop that does not line up with the latest one is a re-anchoring (a plan
+    /// change); it must not narrow the current schedule to nothing.
+    func testAnEarlierDropThatDisagreesIsIgnored() throws {
+        let series = [
+            sample(0, sd: 50), sample(15, sd: 0),                            // Tuesday, say
+            sample(3 * day, sd: 40), sample(3 * day + 15, sd: 0),            // plan change: Friday
+            sample(10 * day, sd: 60), sample(10 * day + 15, sd: 1),          // Friday again
+        ]
+        let reset = try XCTUnwrap(WeeklyReset.infer(from: series, now: at(11 * day)))
+        XCTAssertEqual(reset.resetsAfter, at(17 * day))
+        XCTAssertEqual(reset.resetsBy, at(17 * day + 15))
+    }
+
+    func testADropWiderThanAWeekSaysNothingAboutTheSchedule() throws {
+        let wide = [sample(0, sd: 90), sample(8 * day, sd: 5)]
+        XCTAssertNil(WeeklyReset.infer(from: wide, now: at(9 * day)))
+        // …but an earlier tight bracket is still used when the wide one is skipped.
+        let series = [sample(0, sd: 80), sample(15, sd: 1), sample(2 * day, sd: 50), sample(10 * day, sd: 5)]
+        let reset = try XCTUnwrap(WeeklyReset.infer(from: series, now: at(10 * day)))
+        XCTAssertEqual(reset.resetsBy, at(14 * day + 15))
+    }
+
+    func testWeekRowEndsOnceAResetHasCertainlyHappenedSinceTheSample() throws {
+        let series = [sample(0, sd: 60), sample(15, sd: 2), sample(day, sd: 30)]   // resets at (+0, +15] weekly
+        let before = try XCTUnwrap(UsageReading.make(samples: series, now: at(7 * day)))
+        XCTAssertEqual(before.rows.last?.value, .percent(30), "inside the bracket the reset may not have happened")
+        let after = try XCTUnwrap(UsageReading.make(samples: series, now: at(7 * day + 15)))
+        XCTAssertEqual(after.rows.last?.value, .ended)
+        XCTAssertEqual(after.weekly?.resetsBy, at(14 * day + 15), "the next one is a week on")
+    }
+
+    func testWeekRowTrailingTextShowsTheResetAndTheAge() throws {
+        let series = [sample(0, sd: 60), sample(15, sd: 2), sample(day, sd: 30)]
+        let reading = try XCTUnwrap(UsageReading.make(samples: series, now: at(day + 45)))
+        let week = try XCTUnwrap(reading.rows.last)
+        XCTAssertEqual(UsageText.trailing(for: week, in: reading, time: minutes), "resets by +\(7 * 24 * 60 + 15)m (est.) \u{00B7} 45 min ago")
+        XCTAssertTrue(UsageText.tooltip(reading, time: minutes).contains("at the same time every week"))
+        XCTAssertTrue(UsageText.summary(reading, time: minutes).contains("week resets by +\(7 * 24 * 60 + 15)m (est.)"))
+    }
+
     // MARK: - Reading
 
     func testSessionIsCurrentBeforeResetsByAndEndedAfterIt() throws {
@@ -272,14 +346,14 @@ final class UsageHistoryTests: XCTestCase {
         let series = [sample(0, fh: 40), sample(15, fh: 2), sample(30, fh: 12)]
         let reading = try XCTUnwrap(UsageReading.make(samples: series, now: at(40)))
         let row = try XCTUnwrap(reading.rows.first)
-        XCTAssertEqual(UsageText.trailing(for: row, in: reading, time: minutes), "resets by +315m")
+        XCTAssertEqual(UsageText.trailing(for: row, in: reading, time: minutes), "resets by +315m (est.)")
         XCTAssertEqual(UsageText.row(row), "5h 12%")
     }
 
     func testTooltipStatesTheIntervalAndTheRecordingCaveat() throws {
         let series = [sample(0, fh: 40), sample(15, fh: 2), sample(30, fh: 12)]
         let tooltip = UsageText.tooltip(try XCTUnwrap(UsageReading.make(samples: series, now: at(40))), time: minutes)
-        XCTAssertTrue(tooltip.contains("ends between +300m and +315m"), tooltip)
+        XCTAssertTrue(tooltip.contains("Estimated: the 5-hour window ends between +300m and +315m"), tooltip)
         XCTAssertTrue(tooltip.contains("records usage only while this profile is open"), tooltip)
     }
 
@@ -296,14 +370,14 @@ final class UsageHistoryTests: XCTestCase {
     func testSummaryLineForAProfileWithAndWithoutHistory() throws {
         XCTAssertEqual(UsageText.summary(nil, time: minutes), "no data yet (recorded once Claude has run on this profile)")
         let reading = try XCTUnwrap(UsageReading.make(samples: [sample(0, fh: 22, sd: 92)], now: at(10)))
-        XCTAssertEqual(UsageText.summary(reading, time: minutes), "5h 22% \u{00B7} week 92% \u{00B7} resets by +300m \u{00B7} recorded +0m")
+        XCTAssertEqual(UsageText.summary(reading, time: minutes), "5h 22% \u{00B7} week 92% \u{00B7} resets by +300m (est.) \u{00B7} recorded +0m")
     }
 
     func testAccessibilityTextReadsAsOneSentence() throws {
         let reading = try XCTUnwrap(UsageReading.make(samples: [sample(0, fh: 22, sd: 92)], now: at(45)))
         XCTAssertEqual(
             UsageText.accessibilityText(reading, profileLabel: "Christy", time: minutes),
-            "Christy usage: 5h 22 percent, week 92 percent, resets by +300m, 45 min ago"
+            "Christy usage: 5h 22 percent, week 92 percent, estimated reset by +300m, 45 min ago"
         )
     }
 }
