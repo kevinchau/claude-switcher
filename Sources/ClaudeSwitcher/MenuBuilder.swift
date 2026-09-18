@@ -38,6 +38,10 @@ enum MenuBuilder {
         var blockedUpdate: StagedUpdate?
         /// Set for the duration of "Quit All & Install Update…"; replaces the offer with progress.
         var updateProgress: String?
+        /// profile id -> the usage Claude Desktop last recorded for it (read before the build).
+        var usage: [String: UsageReading] = [:]
+        /// The moment the menu is built; readings are judged against it.
+        var now: Date = Date()
     }
 
     // MARK: - Build
@@ -87,6 +91,9 @@ enum MenuBuilder {
             applyHint(to: item, label: profile.label, signedIn: input.signInStates[profile.id])
             item.toolTip = profileToolTip(profile, input: input)
             menu.addItem(item)
+            if let reading = input.usage[profile.id], !reading.rows.isEmpty {
+                menu.addItem(usageItem(for: profile, reading: reading))
+            }
         }
         if !input.config.profiles.isEmpty {
             menu.addItem(informationalItem("\u{201C}terminal:\u{201D} is the claude CLI sign-in only \u{2014} not the Claude app."))
@@ -213,6 +220,43 @@ enum MenuBuilder {
         menu.addItem(quitItem)
 
         return menu
+    }
+
+    // MARK: - Usage
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    static func usageItemIdentifier(_ profileID: String) -> NSUserInterfaceItemIdentifier {
+        NSUserInterfaceItemIdentifier("claude-switcher.usage.\(profileID)")
+    }
+
+    /// The drawn usage rows under a profile. A view item never draws its title, so the title
+    /// carries the sentence VoiceOver reads; the view itself is not an accessibility element.
+    static func usageItem(for profile: Profile, reading: UsageReading) -> NSMenuItem {
+        let time: (Date) -> String = { timeFormatter.string(from: $0) }
+        let rows = reading.rows.map { row in
+            UsageBarView.Row(
+                label: row.label,
+                percent: row.percent,
+                level: UsageLevel.of(row.percent ?? 0),
+                trailing: UsageText.trailing(for: row, in: reading, time: time)
+            )
+        }
+        let view = UsageBarView(rows: rows)
+        view.toolTip = UsageText.tooltip(reading, time: time)
+        view.setAccessibilityElement(false)
+
+        let item = NSMenuItem(title: UsageText.accessibilityText(reading, profileLabel: profile.label, time: time),
+                              action: nil, keyEquivalent: "")
+        item.view = view
+        item.isEnabled = false
+        item.identifier = usageItemIdentifier(profile.id)
+        return item
     }
 
     // MARK: - Hints

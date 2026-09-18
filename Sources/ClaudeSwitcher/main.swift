@@ -39,7 +39,8 @@ WHAT STAYS SHARED
   ~/.claude — projects, session history, skills, agents, plugins, memory, settings and
   CLAUDE.md — is shared by every profile. claude-switcher never sets CLAUDE_CONFIG_DIR,
   never sets CLAUDE_CODE_OAUTH_TOKEN, and never reads or writes Keychain secrets (it only
-  checks whether a credential item exists).
+  checks whether a credential item exists). Usage shown per profile is read from that
+  profile's own plan-usage-history.json, which Claude Desktop writes; it is never fetched.
 """
 
 /// Prints the launch plan without touching anything. Returns the process exit code.
@@ -58,7 +59,15 @@ private func runDryRun() -> Int32 {
     // Read-only: enumerates running processes so the plan can say what is already up.
     let running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
     let update = UpdateProbe.status(appPath: config.claudeAppPath)
-    print(Diagnostics.launchPlan(config: config, running: running, update: update))
+    let now = Date()
+    var usage: [String: UsageReading] = [:]
+    for profile in config.profiles {
+        if let samples = UsageHistory.read(userDataDir: profile.userDataDir),
+           let reading = UsageReading.make(samples: samples, now: now) {
+            usage[profile.id] = reading
+        }
+    }
+    print(Diagnostics.launchPlan(config: config, running: running, update: update, usage: usage, now: now))
     return 0
 }
 

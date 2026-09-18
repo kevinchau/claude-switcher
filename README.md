@@ -54,13 +54,15 @@ The whole interface is one menu — here with two accounts running at once:
   <img src="assets/menu.png" width="660" alt="The Claude Switcher menu with two profiles, Personal and Christy, both running">
 </p>
 
-Its structure as text, read from the running app's accessibility tree — one row per
-account, a checkmark on the ones currently up:
+Its structure as text — one row per account, a checkmark on the ones currently up, and
+under each account that has run, its usage bars (see [§2.10](#210-where-the-usage-bars-come-from)):
 
 ```
 Running: Personal
 ──────────────────────────────
 ✓ Personal            terminal: signed in
+    5h    ▰▰▱▱▱▱▱▱▱▱   22%   resets by 9:13 PM
+    week  ▰▰▰▰▰▰▰▰▰▱   92%   2 h ago
   Work                terminal: no credentials found
   Open Source         terminal: no credentials found
 "terminal:" is the claude CLI sign-in only — not the Claude app.
@@ -181,6 +183,7 @@ The menu is rebuilt on every open so running state is fresh.
 
 - A disabled header: `Running: Personal, Work` — or `Claude is not running`.
 - **Quit All & Install Update…**, under a disabled line naming the version — shown only while Claude has an update downloaded, its installer is alive and waiting, and at least one instance is running (see [§2.9](#29-updates-need-every-instance-to-quit)). It confirms first, naming the profiles it will quit and reopen and any unrecognized instances it will quit and *not* reopen. It then asks every instance to quit (the same as ⌘Q — never forced), waits for Claude's own installer to finish, and reopens the profiles that were running; if an instance will not quit, nothing is reopened and it says which profiles are closed. While it runs, a progress line replaces the offer. **This is the only thing in the app that ever quits Claude, and it never happens on its own.**
+- Under each profile that has ever run, its **usage bars**: one drawn row per limit Claude reports for that account — `5h` (the five-hour session) and `week`, plus `Opus`, `Sonnet`, `Cowork`, `apps` or `extra` when the account has those — with the percentage, a bar that turns orange at 80 % and red at 100 %, and a note: the session row says when the window ends ("resets by 9:13 PM", a certain upper bound), the week row says how old the reading is. A dash means the period has certainly ended since the reading. Hover for the full picture. Read from the profile's own `plan-usage-history.json`, never fetched — [§2.10](#210-where-the-usage-bars-come-from).
 - One item per profile: the label, a checkmark when an instance for that profile is running, and a badge hint about the terminal CLI. The hint has **three** states, from `MenuBuilder.hintText`:
 
   | probe result | hint |
@@ -194,7 +197,7 @@ The menu is rebuilt on every open so running state is fresh.
 - **Add Profile…**, **Rename Profile** (one item per profile; changes only the label shown in the menu — the id, both directories and therefore the Keychain service name stay exactly as they are), and **Remove Profile** (disabled for the default profile and for the active profile; confirms first; **never deletes the profile's data directories**, and says so in the dialog).
 - **Choose Claude.app…** — an `NSOpenPanel`, offered when the configured path is missing or on request.
 - **Reveal ~/.claude in Finder**.
-- **Diagnostics** — a selectable-text alert with: the config path; the resolved `Claude.app` path, its `CFBundleIdentifier` and version, any staged update and whether Claude's installer is running; the shared config dir (`~/.claude`) and confirmation that `CLAUDE_CONFIG_DIR` is unset; each profile with its normalized directories, derived Keychain service name and running pid; and the `claude` CLI version for both the `PATH` binary and the app-managed sidecar if present.
+- **Diagnostics** — a selectable-text alert with: the config path; the resolved `Claude.app` path, its `CFBundleIdentifier` and version, any staged update and whether Claude's installer is running; the shared config dir (`~/.claude`) and confirmation that `CLAUDE_CONFIG_DIR` is unset; each profile with its normalized directories, derived Keychain service name, running pid and last recorded usage; and the `claude` CLI version for both the `PATH` binary and the app-managed sidecar if present.
 - **Launch at Login** — a checkbox bound to `SMAppService.mainApp`, reflecting `.status`. A bundle that has never been registered reports `.notFound`, which is *not* an error: it is shown as an unchecked box and clicking it registers. The item is greyed out only when the process is not inside an `.app` bundle (`swift run`), where there is nothing launchd could register.
 - **Quit**.
 
@@ -223,7 +226,7 @@ An update install holds the same flag from confirmation until the last profile i
 | Desktop MCP config | `claude_desktop_config.json` in the Electron profile | Per-account |
 | Chat history | server-side, on the Anthropic account | Per-account (cannot be shared) |
 | Cowork / remote sessions | server-side | Per-account |
-| Usage limits and plan | server-side | Per-account |
+| Usage limits and plan | server-side | Per-account. Claude Desktop records each account's usage into its own profile directory; the switcher shows those readings ([§2.10](#210-where-the-usage-bars-come-from)). |
 | Terminal CLI credentials | Keychain item, service name from [§2.7](#27-keychain-service-name-derivation) | Per-account (per `credDir`) |
 
 ---
@@ -330,6 +333,21 @@ The sequence is deliberately timid:
 
 Everything here is read-only apart from the quit request itself: nothing under the helper's cache directory is written, moved or deleted, the helper is never started by this tool, and the `Claude.app` bundle is only ever replaced by Claude's own installer.
 
+### 2.10 Where the usage bars come from
+
+Other menu-bar meters get Claude usage by reading the OAuth token out of the Keychain, reusing browser cookies, or driving the CLI. This tool does none of that ([rule 1](#appendix-b--hard-constraints)) — and the Keychain token is the *terminal's* account anyway, not the Desktop profile's.
+
+Claude Desktop already keeps the answer, per profile. Each running instance samples its account's plan usage and appends it to `plan-usage-history.json` **in its own user-data directory** — `~/Library/Application Support/Claude/` for the default profile, the profile's `--user-data-dir` otherwise. Read out of the app's sampler: a sample is `{"t": <ms>, "org": "<uuid>", "u": {…}}`, appended at most every 270 seconds per org (about every 15 minutes in practice), kept for 30 days, written atomically. `u` maps each limit the account has to a utilization percentage: `fh` the five-hour session, `sd` the week, and only for accounts that have them `so` / `sn` (weekly Opus / Sonnet), `cw` (Cowork), `oa` (OAuth apps), `xu` (extra usage) and a couple of others. Reset times are not stored — the app receives them but keeps only the percentages. A legacy `version: 1` layout (`fh`/`sd` beside `t`) reads the same.
+
+The switcher reads that file when the menu opens and shows the latest sample of the org the profile is currently on. Two things make the numbers honest rather than merely present:
+
+- **Freshness.** The app records only while that profile is open, so a closed profile's reading is its last observation. Weekly usage only rises until the reset, so a stale value is a floor; the week row carries the reading's age once it is over 30 minutes old, and reads "—" once it is a week old. Usage from claude.ai or the phone on the same account shows up only the next time that profile is open.
+- **The session window's end is a certain bound, not a guess.** Inside one five-hour window utilization never decreases and the window is five hours long, so the longest trailing run of non-decreasing `fh` samples spanning under five hours lies within one window. The window was already running at that run's first positive sample, so it ends *no later than* five hours after it — that is the "resets by" shown. The sample before the run (a drop, or one five hours older) belongs to an earlier window, so it ends *no earlier than* five hours after that — the tooltip shows both bounds. While a profile is open the interval is about one sampling gap wide; after an idle stretch it is wider, and the row still only ever claims the safe end. Once "resets by" has passed the row shows "—": a new window may have started on another device, unseen. A `0` sample is treated as an ordinary member of a run, because the histories on this Mac show windows that had already started before a sample that still read 0.
+
+No weekly reset is inferred. The obvious rule — last drop plus seven days — was checked against a real history and would have been wrong twice: that account's weekly figure dropped to zero on the 1st, 4th, 5th and 12th of the month.
+
+The file is only ever read. Nothing is written, moved or deleted, nothing is fetched, and no token or cookie is touched for this. If a Claude update changes the format, the bars disappear rather than mislead.
+
 ---
 
 ## Signing and distribution
@@ -411,7 +429,7 @@ make clean      # rm -rf .build build
 make dry-run    # swift run -c release claude-switcher --dry-run
 ```
 
-`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.3.0`. No Xcode project is involved.
+`make bundle` wraps the release binary in a minimal app bundle (an `Info.plist` carrying `LSUIElement`, plus the `CFBundleIdentifier` the login item is registered under — `tech.local.claude-switcher`) because `SMAppService.mainApp` needs a bundle. The script lints the generated plist, strips extended attributes, signs, and verifies the signature. Set `VERSION` to override the default `0.4.0`. No Xcode project is involved.
 
 ### Layout
 
@@ -419,7 +437,7 @@ A SwiftPM package (`swift-tools-version:6.0`, every target compiled with `.swift
 
 | Target | Path | What it is |
 | --- | --- | --- |
-| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning`, `UpdateProbe`, `UpdateInstaller`, `LoginItem` |
+| `ClaudeSwitcherCore` (library) | `Sources/ClaudeSwitcherCore` | Pure, testable logic: `Config`, `PathNormalizer`, `KeychainProbe`, `ProcessArgs`, `InstanceManager`, `LaunchPlanning`, `UpdateProbe`, `UpdateInstaller`, `LoginItem`, `UsageHistory` |
 | `claude-switcher` (executable) | `Sources/ClaudeSwitcher` | Thin AppKit shell: `main.swift`, `AppDelegate`, `MenuBuilder`, `Diagnostics` |
 | `ClaudeSwitcherTests` | `Tests/ClaudeSwitcherTests` | Tests, importing `ClaudeSwitcherCore` |
 
@@ -427,7 +445,7 @@ The split is deliberate: a test target cannot import an executable target cleanl
 
 ### Tests
 
-`make test` runs **152 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
+`make test` runs **187 tests**, covering config round-trip and file IO, path normalization, Keychain service-name derivation (including known-good vectors, NFC equivalence and spelling collapse), profile mutation and validation rules, `KERN_PROCARGS2` argv parsing (padding, embedded spaces, truncated and garbage buffers), instance-to-profile binding, launch planning, usage-history parsing and session-window inference (including series shaped like the real ones), staged-update detection against fixture bundles (JSON request file, percent-encoded and symlinked paths, lingering requests, fresh version reads), and the whole quit → install → reopen sequence run against a scripted fake with virtual time — no test ever quits, signals or launches a real process.
 
 ### `--dry-run` and `--help`
 
@@ -506,6 +524,7 @@ Checked again at **load** time (`Config.init(from:)`), since the file is hand-ed
 - **The tool never reads, writes or migrates credentials.** Each account is signed in by you, interactively, once. Keychain interaction is an existence check with `security find-generic-password -s <service> -a "$USER"` and never `-w`; any failure is indistinguishable from a genuine absence and is reported the same way (see the hint table under [Usage](#usage)). `CLAUDE_CODE_OAUTH_TOKEN` is never set by this tool.
 - **The "terminal: signed in" hint is about the CLI only.** It says nothing about whether the Desktop profile is logged in.
 - **Claude cannot update itself while two profiles are open.** Its installer waits for every instance to quit, so a profile that quits itself to be updated stays closed until the rest do too ([§2.9](#29-updates-need-every-instance-to-quit)). The menu says when this is happening and offers **Quit All & Install Update…**; using it interrupts whatever Claude is doing in every profile, like any quit. Detection reads Squirrel's internal files, so a Claude update may break it — in which case the menu simply stops mentioning updates, and quitting every profile by hand still works.
+- **Usage bars are the app's own last observation, not a live figure.** They come from a file Claude Desktop writes for itself ([§2.10](#210-where-the-usage-bars-come-from)); it is undocumented, it is updated only while that profile is open, and the session "resets by" time is an inferred upper bound. A dash means the reading is certainly out of date.
 - **Removing a profile never deletes its data.** The Electron profile dir and credential dir are left on disk; delete them yourself if you want them gone.
 
 ---
@@ -562,6 +581,7 @@ public struct Config: Codable, Equatable, Sendable {
     public var activeProfileId: String
     public var profiles: [Profile]
     public static var configURL: URL { get }              // ~/.config/claude-switcher/config.json
+    public static func defaultUserDataDir(home: String = NSHomeDirectory()) -> String   // ~/Library/Application Support/Claude — the one place that name lives
     public static func load() throws -> Config            // defaultConfig() when the file is absent
     public static func load(from url: URL) throws -> Config
     public func save() throws                             // atomic, parent dirs created, mode 0600
@@ -657,6 +677,45 @@ public enum LoginItem {
     public static func runsFromBundle(_ bundle: Bundle = .main) -> Bool
 }
 
+// ── Sources/ClaudeSwitcherCore/UsageHistory.swift ────────────────────────────
+public struct UsageSample: Equatable, Sendable { sampledAt: Date; org: String?; utilization: [String: Int] }
+
+public enum UsageHistory {                     // read-only, every member
+    public static let fileName = "plan-usage-history.json"
+    public static func fileURL(forUserDataDir dir: String?, home: String = NSHomeDirectory()) -> URL
+    public static func samples(from data: Data) -> [UsageSample]?          // v1 + v2, sorted; nil unless a history
+    public static func read(userDataDir: String?, home: String = NSHomeDirectory()) -> [UsageSample]?
+    public static func currentOrgSamples(_ samples: [UsageSample]) -> [UsageSample]
+}
+
+public struct SessionWindow: Equatable, Sendable {   // certain bounds, not estimates
+    public static let length: TimeInterval           // 5 h
+    public let utilization: Int
+    public let resetsAfter: Date                     // exclusive
+    public let resetsBy: Date                        // inclusive — what the row shows
+    public static func infer(from samples: [UsageSample]) -> SessionWindow?
+}
+
+public enum UsageLevel: Equatable, Sendable { case normal, warning, limit   // < 80, 80…99, ≥ 100
+    public static func of(_ percent: Int) -> UsageLevel }
+
+public struct UsageReading: Equatable, Sendable {
+    public enum Value: Equatable, Sendable { case percent(Int), ended }
+    public struct Row: Equatable, Sendable { key: String; label: String; value: Value }
+    public static let rowTable: [(key: String, label: String)]   // fh 5h, sd week, so Opus, sn Sonnet, cw Cowork, oa apps, xu extra
+    public let sampledAt: Date, age: TimeInterval, rows: [Row], session: SessionWindow?, unlisted: [String: Int]
+    public static func make(samples: [UsageSample], now: Date) -> UsageReading?
+}
+
+public enum UsageText {                        // `time` renders a clock time; injected
+    public static func age(_ interval: TimeInterval) -> String?                    // nil under 30 min
+    public static func row(_ row: UsageReading.Row) -> String                      // "5h 22%" / "5h —"
+    public static func trailing(for row: UsageReading.Row, in reading: UsageReading, time: (Date) -> String) -> String?
+    public static func tooltip(_ reading: UsageReading, time: (Date) -> String) -> String
+    public static func accessibilityText(_ reading: UsageReading, profileLabel: String, time: (Date) -> String) -> String
+    public static func summary(_ reading: UsageReading?, time: (Date) -> String) -> String
+}
+
 // ── Sources/ClaudeSwitcherCore/StagedUpdate.swift ────────────────────────────
 public struct AppVersion: Equatable, Sendable, CustomStringConvertible {
     public let short: String     // CFBundleShortVersionString
@@ -740,5 +799,6 @@ Violating any of these is a critical defect:
 10. No external dependencies. AppKit and Foundation only.
 11. **Never** quit a Claude instance except from the explicit, confirmed **Quit All & Install Update…** action, and then only the pids in the snapshot the user confirmed. `NSRunningApplication.terminate()` only — **never** `forceTerminate()`, **never** a signal. `InstanceManager.terminate(pid:expecting:)` is the single call site.
 12. **Never** write, move or delete anything under `~/Library/Caches/<bundle id>.ShipIt`, never edit its request file, and never start `ShipIt`. The update is installed by Claude's installer or not at all.
+13. **Never** fetch usage from the network, and never read a token or cookie to do so. Usage comes only from each profile's own `plan-usage-history.json`, which is read and **never** written, moved or deleted.
 
 </details>

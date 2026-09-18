@@ -21,7 +21,13 @@ public enum Diagnostics {
 
     /// The full `--dry-run` report. Pure: builds a string from values handed to it, so it
     /// can be printed with no UI, no directory creation and nothing launched.
-    public static func launchPlan(config: Config, running: [RunningInstance], update: UpdateStatus? = nil) -> String {
+    public static func launchPlan(
+        config: Config,
+        running: [RunningInstance],
+        update: UpdateStatus? = nil,
+        usage: [String: UsageReading] = [:],
+        now: Date = Date()
+    ) -> String {
         var lines: [String] = []
         lines.append("claude-switcher launch plan (dry run — nothing was launched or created)")
         lines.append("")
@@ -66,6 +72,7 @@ public enum Diagnostics {
             }
             lines.append("  keychain item:   \(KeychainProbe.serviceName(forCredDir: profile.credDir))  (terminal CLI only; existence check only — the secret is never read)")
             lines.append("  terminal cmd:    \(terminalCommand(for: profile))")
+            lines.append("  usage:           \(UsageText.summary(usage[profile.id], time: clockTime))  (read from this profile's plan-usage-history.json; never fetched)")
             lines.append("")
         }
 
@@ -94,6 +101,14 @@ public enum Diagnostics {
         return what + " — cannot install until every instance quits (\(runningCount) running)"
     }
 
+    /// Clock times in reports, in the user's locale.
+    static func clockTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
     static var sharedConfigDirectory: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude")
     }
@@ -103,9 +118,11 @@ public enum Diagnostics {
     public struct ProfileQuery: Sendable {
         public let id: String
         public let credDir: String?
-        public init(id: String, credDir: String?) {
+        public let userDataDir: String?
+        public init(id: String, credDir: String?, userDataDir: String? = nil) {
             self.id = id
             self.credDir = credDir
+            self.userDataDir = userDataDir
         }
     }
 
@@ -127,18 +144,29 @@ public enum Diagnostics {
         public var cli: CLIProbe
         /// profile id -> terminal CLI sign-in (existence check only; false on any failure).
         public var signedIn: [String: Bool]
+        /// profile id -> the usage Claude Desktop last recorded, from the profile's own file.
+        public var usage: [String: UsageReading]
+        public var now: Date
     }
 
     public static func probe(appPath: String, profiles: [ProfileQuery]) -> Probe {
+        let now = Date()
         var signedIn: [String: Bool] = [:]
+        var usage: [String: UsageReading] = [:]
         for query in profiles {
             signedIn[query.id] = KeychainProbe.isSignedIn(credDir: query.credDir)
+            if let samples = UsageHistory.read(userDataDir: query.userDataDir),
+               let reading = UsageReading.make(samples: samples, now: now) {
+                usage[query.id] = reading
+            }
         }
         return Probe(
             bundleIdentifier: InstanceManager.bundleIdentifier(appPath: appPath),
             update: UpdateProbe.status(appPath: appPath),
             cli: probeCLI(),
-            signedIn: signedIn
+            signedIn: signedIn,
+            usage: usage,
+            now: now
         )
     }
 
@@ -159,8 +187,8 @@ public enum Diagnostics {
     /// ~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude
     /// Returns the highest version present.
     static func newestSidecarExecutable() -> URL? {
-        let root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/Claude/claude-code")
+        let root = URL(fileURLWithPath: Config.defaultUserDataDir())
+            .appendingPathComponent("claude-code")
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return nil }
         let candidates: [(version: String, url: URL)] = entries.compactMap { name in
             let executable = root
@@ -252,6 +280,7 @@ public enum Diagnostics {
             lines.append("    desktop app:    \(instance.map { "running (pid \($0.pid))" } ?? "not running")")
             lines.append("    argv:           \(launchArguments(for: profile).map { "\"\($0)\"" }.joined(separator: " "))")
             lines.append("    terminal cmd:   \(terminalCommand(for: profile))")
+            lines.append("    usage:          \(UsageText.summary(probe.usage[profile.id], time: clockTime))")
             lines.append("")
         }
 
@@ -270,6 +299,7 @@ public enum Diagnostics {
         lines.append("  No CLAUDE_* variable is ever passed to Claude.app; the account comes from --user-data-dir.")
         lines.append("  The Claude.app bundle is never modified, copied or duplicated.")
         lines.append("  Claude is only ever asked to quit by \u{201C}Quit All & Install Update\u{2026}\u{201D}, after you confirm — never forced.")
+        lines.append("  Usage is read from each profile's own plan-usage-history.json — never written, never fetched, no token or cookie read.")
         lines.append("  Removing a profile in this app never deletes anything on disk.")
 
         return lines.joined(separator: "\n")

@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var signInStates: [String: Bool] = [:]
     private var isProbingSignIn = false
 
+    /// profile id -> the usage Claude Desktop last recorded for that profile, read from its
+    /// own `plan-usage-history.json` when the menu opens. Read-only; never fetched.
+    private var usage: [String: UsageReading] = [:]
+
     /// Launches are serialized: while one is in flight the profile items are disabled and
     /// re-enabled from the completion handler, success or failure.
     private var isBusy = false
@@ -89,8 +93,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
         // Read-only and quick: one small JSON file, two Info.plists, a process-name scan.
         blockedUpdate = UpdateProbe.status(appPath: config.claudeAppPath).blocked
+        usage = Self.readUsage(for: config.profiles)
         refreshSignInStates()
         rebuild(menu)
+    }
+
+    /// Each profile's history is a small JSON file (about 27 KB after a month); reading them
+    /// all is well under a millisecond, in the same class as the other read-only probes here.
+    private static func readUsage(for profiles: [Profile]) -> [String: UsageReading] {
+        let now = Date()
+        var readings: [String: UsageReading] = [:]
+        for profile in profiles {
+            guard let samples = UsageHistory.read(userDataDir: profile.userDataDir),
+                  let reading = UsageReading.make(samples: samples, now: now) else { continue }
+            readings[profile.id] = reading
+        }
+        return readings
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -107,7 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             claudeAppExists: FileManager.default.fileExists(atPath: PathNormalizer.normalize(config.claudeAppPath)),
             launchAtLogin: launchAtLoginState(),
             blockedUpdate: blockedUpdate,
-            updateProgress: updateProgress
+            updateProgress: updateProgress,
+            usage: usage,
+            now: Date()
         )
         let built = MenuBuilder.build(input, target: self, actions: Self.actions)
         // An NSMenuItem belongs to one menu, so detach before re-parenting.
@@ -444,6 +464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         saveConfig(failureTitle: "Could not save the change")
         signInStates.removeValue(forKey: id)
+        usage.removeValue(forKey: id)
     }
 
     /// Lowercased, dash-separated, unique against the existing ids. The slug also names the
@@ -667,7 +688,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         reloadConfig()
         running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
         let appPath = config.claudeAppPath
-        let queries = config.profiles.map { Diagnostics.ProfileQuery(id: $0.id, credDir: $0.credDir) }
+        let queries = config.profiles.map { Diagnostics.ProfileQuery(id: $0.id, credDir: $0.credDir, userDataDir: $0.userDataDir) }
 
         Task {
             let probe = await Task.detached(priority: .userInitiated) {

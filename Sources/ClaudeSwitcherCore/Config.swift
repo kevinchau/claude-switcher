@@ -198,6 +198,14 @@ public struct Config: Codable, Equatable, Sendable {
     /// tool exists to keep shared and intact. Aimed at the app's *own* default profile
     /// directory, it would put two concurrent Chromium processes on one LevelDB store, which
     /// can corrupt the user's primary Desktop login.
+    /// Claude.app's own Electron user-data directory — where the default profile lives.
+    ///
+    /// Electron derives it from the product name, so the folder is `Claude` whatever the
+    /// bundle is called. This is the one place that name is spelled out.
+    public static func defaultUserDataDir(home: String = NSHomeDirectory()) -> String {
+        PathNormalizer.normalize("Library/Application Support/Claude", home: home)
+    }
+
     static func validateReservedDirectory(_ raw: String?) throws {
         guard let raw else { return }
         let candidate = PathNormalizer.normalize(raw)
@@ -208,7 +216,7 @@ public struct Config: Codable, Equatable, Sendable {
             (home, "your home directory"),
             (PathNormalizer.normalize(home + "/.claude"),
              "the shared Claude config directory that every profile depends on"),
-            (PathNormalizer.normalize(home + "/Library/Application Support/Claude"),
+            (defaultUserDataDir(home: home),
              "Claude.app\u{2019}s own default profile directory"),
         ]
         for entry in reserved where entry.path == candidate {
