@@ -28,6 +28,13 @@ ZIP="$ROOT/build/$APP_NAME.zip"
 DMG="$ROOT/build/$APP_NAME.dmg"
 NOTARY_PROFILE="${NOTARY_PROFILE:-claude-switcher}"
 
+# Optional local credentials: a gitignored .notary.env at the repo root setting the ASC_*
+# (or APPLE_ID / TEAM_ID / APP_PASSWORD) variables described above. The environment wins.
+if [[ -f "$ROOT/.notary.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/.notary.env"
+fi
+
 # TARGET=app (default) notarizes the .app, submitted as a zip because the notary
 # service takes archives, not bundles. TARGET=dmg notarizes the disk image, which
 # is submitted directly. A .dmg needs its OWN ticket: Gatekeeper judges the file
