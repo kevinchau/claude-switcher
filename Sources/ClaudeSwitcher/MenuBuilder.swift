@@ -18,17 +18,19 @@ enum MenuBuilder {
         var chooseClaudeApp: Selector
         var revealSharedDirectory: Selector
         var showDiagnostics: Selector
+        var showWelcome: Selector
         var toggleLaunchAtLogin: Selector
         var toggleReopenAfterUpdate: Selector
         var toggleBlockUpdates: Selector
         var installUpdate: Selector
+        var copySession: Selector
         var quit: Selector
     }
 
     struct Input {
         var config: Config
         var running: [RunningInstance]
-        /// profile id -> terminal CLI sign-in. A missing entry renders as "unknown"
+        /// profile id -> terminal CLI sign-in. A missing entry renders with no badge
         /// rather than blocking the rebuild on a Keychain existence check.
         var signInStates: [String: Bool]
         var isBusy: Bool
@@ -46,6 +48,15 @@ enum MenuBuilder {
         var now: Date = Date()
         /// Set after profiles were reopened automatically; shown once so it is never silent.
         var autoReopenNotice: String?
+        /// No claude CLI was found at launch; the copied commands cannot run without one.
+        var cliIsMissing: Bool = false
+        /// Each account's Code sessions, as last read off the main thread. `nil`: not read yet.
+        var sessions: SessionMenuData?
+        /// Set while a session is being copied to another account; one at a time.
+        var copyProgress: String?
+        /// What a recovery pass at launch did about copies that had not finished: one short line,
+        /// the notes in its tooltip. Shown once so it is never silent; Diagnostics keeps them.
+        var copyNotes: [SessionCopy.RecoveryNote] = []
     }
 
     // MARK: - Build
@@ -67,6 +78,19 @@ enum MenuBuilder {
         if let notice = input.autoReopenNotice {
             menu.addItem(informationalItem(notice))
         }
+        if !input.copyNotes.isEmpty {
+            let item = informationalItem(SessionMenu.recoverySummary(input.copyNotes))
+            item.toolTip = input.copyNotes.map(\.message).joined(separator: "\n\n")
+            menu.addItem(item)
+        }
+        if let progress = input.copyProgress {
+            menu.addItem(informationalItem(progress))
+        } else if let unfinished = input.sessions?.unfinished, !unfinished.isEmpty {
+            // For as long as a journal is kept. Not while a copy runs: its own journal is one.
+            let item = informationalItem(SessionMenu.unfinishedSummary(unfinished))
+            item.toolTip = SessionMenu.unfinishedToolTip
+            menu.addItem(item)
+        }
         if let progress = input.updateProgress {
             menu.addItem(informationalItem(progress))
         } else if input.isBusy {
@@ -75,95 +99,100 @@ enum MenuBuilder {
             // Claude's installer waits for every instance of the app to quit, so with more than
             // one profile open an update can wait forever — and a profile that quits itself to
             // be updated never comes back. Say so, and offer the one way through.
-            menu.addItem(informationalItem("Claude \(update.staged) is downloaded but can\u{2019}t install until every profile quits."))
+            menu.addItem(informationalItem("Claude \(update.staged) is downloaded but can\u{2019}t install until Claude has quit on every account."))
             let installItem = NSMenuItem(title: "Quit All & Install Update\u{2026}", action: actions.installUpdate, keyEquivalent: "")
             installItem.target = target
-            installItem.toolTip = "Asks every running Claude profile to quit, waits for Claude\u{2019}s own installer to finish, then reopens the profiles that were running. Nothing happens until you confirm."
+            installItem.toolTip = "Asks Claude to quit on every account, waits for Claude\u{2019}s own installer to finish, then reopens the accounts that were running. Nothing happens until you confirm."
             menu.addItem(installItem)
         }
 
         menu.addItem(.separator())
 
-        // MARK: Profiles
+        // MARK: Accounts
+        // "Account" is the word on screen; `Profile` stays the type and the config key.
         if input.config.profiles.isEmpty {
-            menu.addItem(informationalItem("No profiles configured."))
+            menu.addItem(informationalItem("No accounts yet."))
         }
         for profile in input.config.profiles {
             let item = NSMenuItem(title: profile.label, action: actions.selectProfile, keyEquivalent: "")
             item.target = target
             item.representedObject = profile.id
-            item.identifier = profileItemIdentifier(profile.id)
             item.state = ProfileMatching.isRunning(profile, in: input.running) ? .on : .off
             item.isEnabled = !input.isBusy && input.claudeAppExists
-            applyHint(to: item, label: profile.label, signedIn: input.signInStates[profile.id])
             item.toolTip = profileToolTip(profile, input: input)
             menu.addItem(item)
             if let reading = input.usage[profile.id], !reading.rows.isEmpty {
                 menu.addItem(usageItem(for: profile, reading: reading, now: input.now))
             }
-        }
-        if !input.config.profiles.isEmpty {
-            menu.addItem(informationalItem("\u{201C}terminal:\u{201D} is the claude CLI sign-in only \u{2014} not the Claude app."))
+            menu.addItem(SessionMenu.item(for: profile, input: input, target: target, action: actions.copySession))
         }
 
         menu.addItem(.separator())
 
         // MARK: Copy terminal command
+        // The terminal sign-in is shown here, not on the account rows: as a badge there it
+        // read as something wrong with the account, when the Claude app signs in on its own.
         let copyItem = NSMenuItem(title: "Copy terminal command", action: nil, keyEquivalent: "")
+        copyItem.identifier = terminalMenuIdentifier
         let copyMenu = NSMenu()
         copyMenu.autoenablesItems = false
         if input.config.profiles.isEmpty {
-            copyMenu.addItem(informationalItem("No profiles"))
+            copyMenu.addItem(informationalItem("No accounts"))
+        } else {
+            copyMenu.addItem(informationalItem("For the claude CLI in a terminal \u{2014} it signs in separately from the Claude app."))
+        }
+        if input.cliIsMissing {
+            copyMenu.addItem(informationalItem("No claude CLI was found on this Mac \u{2014} these commands need it installed."))
         }
         for profile in input.config.profiles {
-            let command = Diagnostics.terminalCommand(for: profile)
             let sub = NSMenuItem(title: profile.label, action: actions.copyTerminalCommand, keyEquivalent: "")
             sub.target = target
             sub.representedObject = profile.id
+            sub.identifier = terminalItemIdentifier(profile.id)
             sub.isEnabled = true
-            sub.toolTip = "Copies:  \(command)\nRun it in a terminal to use the claude CLI as this profile. ~/.claude stays shared."
+            applyHint(to: sub, profile: profile, signedIn: input.signInStates[profile.id])
             copyMenu.addItem(sub)
         }
         copyItem.submenu = copyMenu
         menu.addItem(copyItem)
 
-        // MARK: Add profile
-        let addItem = NSMenuItem(title: "Add Profile\u{2026}", action: actions.addProfile, keyEquivalent: "")
+        // MARK: Add account
+        let addItem = NSMenuItem(title: "Add Account\u{2026}", action: actions.addProfile, keyEquivalent: "")
         addItem.target = target
         addItem.isEnabled = !input.isBusy
         menu.addItem(addItem)
 
-        // MARK: Rename profile
-        let renameItem = NSMenuItem(title: "Rename Profile", action: nil, keyEquivalent: "")
+        // MARK: Rename account
+        let renameItem = NSMenuItem(title: "Rename Account", action: nil, keyEquivalent: "")
         let renameMenu = NSMenu()
         renameMenu.autoenablesItems = false
         if input.config.profiles.isEmpty {
-            renameMenu.addItem(informationalItem("No profiles"))
+            renameMenu.addItem(informationalItem("No accounts"))
         }
         for profile in input.config.profiles {
             let sub = NSMenuItem(title: profile.label, action: actions.renameProfile, keyEquivalent: "")
             sub.target = target
             sub.representedObject = profile.id
             sub.isEnabled = !input.isBusy
-            sub.toolTip = "Changes only the name shown in this menu. Directories, sign-ins and the profile id stay as they are."
+            sub.toolTip = "Changes only the name shown in this menu. Directories, sign-ins and the account\u{2019}s id stay as they are."
             renameMenu.addItem(sub)
         }
         renameItem.submenu = renameMenu
         menu.addItem(renameItem)
 
-        // MARK: Remove profile
-        let removeItem = NSMenuItem(title: "Remove Profile", action: nil, keyEquivalent: "")
+        // MARK: Remove account
+        let removeItem = NSMenuItem(title: "Remove Account", action: nil, keyEquivalent: "")
         let removeMenu = NSMenu()
         removeMenu.autoenablesItems = false
         if input.config.profiles.isEmpty {
-            removeMenu.addItem(informationalItem("No profiles"))
+            removeMenu.addItem(informationalItem("No accounts"))
         }
         for profile in input.config.profiles {
             let isDefault = profile.isDefaultProfile
             let isActive = profile.id == input.config.activeProfileId
             var title = profile.label
             if isDefault {
-                title += " (default profile)"
+                title += " (default account)"
             } else if isActive {
                 title += " (active)"
             }
@@ -172,11 +201,11 @@ enum MenuBuilder {
             sub.representedObject = profile.id
             sub.isEnabled = !isDefault && !isActive && !input.isBusy
             if isDefault {
-                sub.toolTip = "The default profile cannot be removed."
+                sub.toolTip = "The default account cannot be removed."
             } else if isActive {
-                sub.toolTip = "This profile is active. Switch to another profile first."
+                sub.toolTip = "This account is active. Switch to another account first."
             } else {
-                sub.toolTip = "Forgets the profile. Nothing on disk is deleted."
+                sub.toolTip = "Forgets the account. Nothing on disk is deleted."
             }
             removeMenu.addItem(sub)
         }
@@ -194,8 +223,13 @@ enum MenuBuilder {
 
         let revealItem = NSMenuItem(title: "Reveal ~/.claude in Finder", action: actions.revealSharedDirectory, keyEquivalent: "")
         revealItem.target = target
-        revealItem.toolTip = "Projects, session history, skills, agents, plugins, memory and settings \u{2014} shared by every profile."
+        revealItem.toolTip = "Skills, agents, plugins, memory, settings and every session\u{2019}s transcript \u{2014} shared by every account."
         menu.addItem(revealItem)
+
+        let welcomeItem = NSMenuItem(title: "Welcome\u{2026}", action: actions.showWelcome, keyEquivalent: "")
+        welcomeItem.target = target
+        welcomeItem.toolTip = "How Claude Switcher works, in one window. Opening Claude Switcher again while it is running shows it too."
+        menu.addItem(welcomeItem)
 
         let diagnosticsItem = NSMenuItem(title: "Diagnostics\u{2026}", action: actions.showDiagnostics, keyEquivalent: "")
         diagnosticsItem.target = target
@@ -218,17 +252,17 @@ enum MenuBuilder {
         }
         menu.addItem(loginItem)
 
-        let reopenItem = NSMenuItem(title: "Reopen Profiles After Claude Updates", action: actions.toggleReopenAfterUpdate, keyEquivalent: "")
+        let reopenItem = NSMenuItem(title: "Reopen Accounts After Claude Updates", action: actions.toggleReopenAfterUpdate, keyEquivalent: "")
         reopenItem.target = target
         reopenItem.state = input.config.reopenAfterUpdate ? .on : .off
-        reopenItem.toolTip = "When Claude updates itself it closes, and its installer only reopens the default profile. With this on, the other profiles that closed for the update are started again, in the background, once the update is in. It only ever starts profiles \u{2014} nothing is quit."
+        reopenItem.toolTip = "When Claude updates itself it closes, and its installer only reopens the default account. With this on, the other accounts that closed for the update are started again, in the background, once the update is in. It only ever starts Claude \u{2014} nothing is quit."
         menu.addItem(reopenItem)
 
         let blockItem = NSMenuItem(title: "Block Claude Auto-Updates", action: actions.toggleBlockUpdates, keyEquivalent: "")
         blockItem.target = target
         blockItem.state = input.config.blockClaudeUpdates ? .on : .off
         blockItem.toolTip = input.config.blockClaudeUpdates
-            ? "Claude will not update itself. No security or compatibility fixes arrive, and the Code tab\u{2019}s CLI stops updating too. Applies the next time each profile starts. To update: turn this off and restart a profile."
+            ? "Claude will not update itself. No security or compatibility fixes arrive, and the Code tab\u{2019}s CLI stops updating too. Applies the next time each account starts. To update: turn this off and restart an account."
             : "Stops Claude Desktop from downloading or installing updates, so it never closes itself to update. Asks first, and tells you what you give up."
         menu.addItem(blockItem)
 
@@ -296,38 +330,46 @@ enum MenuBuilder {
 
     // MARK: - Hints
 
-    static func profileItemIdentifier(_ profileID: String) -> NSUserInterfaceItemIdentifier {
-        NSUserInterfaceItemIdentifier("claude-switcher.profile.\(profileID)")
+    static let terminalMenuIdentifier = NSUserInterfaceItemIdentifier("claude-switcher.terminal")
+
+    static func terminalItemIdentifier(_ profileID: String) -> NSUserInterfaceItemIdentifier {
+        NSUserInterfaceItemIdentifier("claude-switcher.terminal.\(profileID)")
     }
 
-    static func hintText(signedIn: Bool?) -> String {
+    /// The terminal CLI's sign-in for an account; `nil` until the Keychain probe has answered.
+    /// "No sign-in found" and not "not signed in": the probe looks for one Keychain item, and
+    /// says the same for a failed lookup or a CLI that is signed in some other way.
+    static func hintText(signedIn: Bool?) -> String? {
         switch signedIn {
-        case .some(true):  return "terminal: signed in"
-        case .some(false): return "terminal: no credentials found"
-        case nil:          return "terminal: unknown"
+        case .some(true):  return "signed in"
+        case .some(false): return "no sign-in found"
+        case nil:          return nil
         }
     }
 
-    /// The hint is a trailing badge where the OS supports one (it stays legible while the
-    /// item is highlighted); otherwise it is appended to the title.
-    static func applyHint(to item: NSMenuItem, label: String, signedIn: Bool?) {
-        let hint = hintText(signedIn: signedIn)
-        if #available(macOS 14.0, *) {
-            item.title = label
-            item.badge = NSMenuItemBadge(string: hint)
-        } else {
-            item.title = "\(label)  \u{2014}  \(hint)"
+    /// The hint is a trailing badge (it stays legible while the item is highlighted), and the
+    /// tooltip says what to do about a "no sign-in found".
+    static func applyHint(to item: NSMenuItem, profile: Profile, signedIn: Bool?) {
+        item.badge = hintText(signedIn: signedIn).map { NSMenuItemBadge(string: $0) }
+        var lines = [
+            "Copies:  \(Diagnostics.terminalCommand(for: profile))",
+            "Run it in a terminal to use the claude CLI as this account. ~/.claude stays shared.",
+        ]
+        if signedIn == false {
+            lines.append("No terminal sign-in was found for this account. That is only the terminal CLI \u{2014} the Claude app has its own sign-in. Sign in once, in the terminal, after running the command.")
         }
+        item.toolTip = lines.joined(separator: "\n")
     }
 
     /// Refreshes only the sign-in hints of an already-built menu, so a Keychain probe that
     /// lands while the menu is open updates in place instead of rebuilding it underneath
     /// the user's cursor.
     static func updateHints(in menu: NSMenu, config: Config, signInStates: [String: Bool]) {
+        guard let terminalMenu = menu.items.first(where: { $0.identifier == terminalMenuIdentifier })?.submenu else { return }
         for profile in config.profiles {
-            let identifier = profileItemIdentifier(profile.id)
-            guard let item = menu.items.first(where: { $0.identifier == identifier }) else { continue }
-            applyHint(to: item, label: profile.label, signedIn: signInStates[profile.id])
+            let identifier = terminalItemIdentifier(profile.id)
+            guard let item = terminalMenu.items.first(where: { $0.identifier == identifier }) else { continue }
+            applyHint(to: item, profile: profile, signedIn: signInStates[profile.id])
         }
     }
 
@@ -354,17 +396,16 @@ enum MenuBuilder {
     static func profileToolTip(_ profile: Profile, input: Input) -> String {
         var lines: [String] = []
         if let instance = ProfileMatching.instance(for: profile, in: input.running) {
-            lines.append("Running (pid \(instance.pid)) \u{2014} selecting brings it to the front.")
+            lines.append("Running (pid \(instance.pid)) \u{2014} selecting brings its window to the front, reopening it if it was closed.")
         } else {
-            lines.append("Not running \u{2014} selecting starts it alongside any other profile.")
+            lines.append("Not running \u{2014} selecting starts it alongside your other accounts.")
         }
         if let dir = profile.userDataDir {
             lines.append("Desktop account data: \(PathNormalizer.normalize(dir))")
         } else {
-            lines.append("Desktop account data: the app's own default profile.")
+            lines.append("Desktop account data: Claude\u{2019}s own default folder.")
         }
-        lines.append("\(hintText(signedIn: input.signInStates[profile.id])) \u{2014} this reflects the terminal claude CLI only.")
-        lines.append("~/.claude (projects, history, skills, agents, memory, settings) is shared by every profile.")
+        lines.append("~/.claude (skills, agents, memory, settings, transcripts) is shared by every account; chats and the Code tab\u{2019}s session list are not.")
         return lines.joined(separator: "\n")
     }
 

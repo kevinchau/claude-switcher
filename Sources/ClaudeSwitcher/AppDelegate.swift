@@ -14,8 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var running: [RunningInstance] = []
 
     /// profile id -> terminal CLI sign-in, from the most recent background Keychain
-    /// existence probe. A missing entry renders as "terminal: unknown"; the menu never
-    /// blocks waiting for one.
+    /// existence probe. A missing entry renders with no badge; the menu never blocks waiting
+    /// for one.
     private var signInStates: [String: Bool] = [:]
     private var isProbingSignIn = false
 
@@ -33,19 +33,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Shown once, on the next menu open, so an automatic reopen is never silent.
     private var autoReopenNotice: String?
     private var autoReopenNoticeWasShown = false
+
+    /// Each account's Code sessions and what can be copied where, from the most recent
+    /// background read. `nil` until the first one lands; the menu never blocks waiting for it.
+    private var sessionData: SessionMenuData?
+    private var isReadingSessions = false
+    /// A read was asked for while one was in flight — after a copy, say — so its result may
+    /// predate what it should show: read once more when it lands.
+    private var sessionsRereadWanted = false
+    /// Non-nil while a session is being copied to another account. One copy at a time.
+    private var copyProgress: String?
+    /// What recovery at launch did about copies that had not finished. Shown once, like
+    /// `autoReopenNotice`, as one line with the notes in its tooltip.
+    private var copyNotes: [SessionCopy.RecoveryNote] = []
+    private var copyNoticeWasShown = false
+    /// The notes of the last recovery pass this app ran, for Diagnostics — until a pass has
+    /// nothing to say.
+    private var lastRecoveryNotes: [SessionCopy.RecoveryNote] = []
     /// One delayed second look per outside trigger, for a run that ended busy or with the
     /// installer still going. Bounded: a retry never schedules another.
     private var reopenRetryAvailable = true
     /// Held for the life of the process by the one switcher allowed to act on its own
     /// initiative (see `AutomationLock`). `nil`: another switcher is running — do nothing automatic.
     private var automationLock: Int32?
+    /// Without the lock because its file could not be opened or locked, not because another
+    /// switcher holds it. Only changes what a refused copy says.
+    private var automationLockUnavailable = false
 
     /// Launches are serialized: while one is in flight the profile items are disabled and
     /// re-enabled from the completion handler, success or failure.
     private var isBusy = false
     private var launchGeneration = 0
     private var isMenuOpen = false
-    private var didWarnAboutMissingCLI = false
+    /// No claude CLI was found at launch — neither on the PATH nor the app's own sidecar.
+    /// Said where it matters, in "Copy terminal command", not in an alert at startup.
+    private var cliIsMissing = false
 
     /// A downloaded Claude update whose installer is waiting on the running instances, as of
     /// the last time the menu opened.
@@ -59,6 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isPresentingModal = false
     private var pendingAlerts: [PendingAlert] = []
 
+    /// The welcome window, once it has been shown; replaced each time it is shown again.
+    private var welcomeWindow: WelcomeWindowController?
+    private static let welcomeShownKey = "welcomeShown"
+
     private static let actions = MenuBuilder.Actions(
         selectProfile: #selector(selectProfile(_:)),
         copyTerminalCommand: #selector(copyTerminalCommand(_:)),
@@ -68,10 +94,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         chooseClaudeApp: #selector(chooseClaudeApp(_:)),
         revealSharedDirectory: #selector(revealSharedDirectory(_:)),
         showDiagnostics: #selector(showDiagnostics(_:)),
+        showWelcome: #selector(showWelcome(_:)),
         toggleLaunchAtLogin: #selector(toggleLaunchAtLogin(_:)),
         toggleReopenAfterUpdate: #selector(toggleReopenAfterUpdate(_:)),
         toggleBlockUpdates: #selector(toggleBlockUpdates(_:)),
         installUpdate: #selector(installUpdate(_:)),
+        copySession: #selector(copySession(_:)),
         quit: #selector(quit(_:))
     )
 
@@ -82,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            if let image = NSImage(systemSymbolName: "person.2.circle", accessibilityDescription: "Claude Switcher") {
+            if let image = NSImage(systemSymbolName: WelcomeWindowController.menuBarSymbolName, accessibilityDescription: "Claude Switcher") {
                 image.isTemplate = true
                 button.image = image
             } else {
@@ -102,7 +130,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // notification), and look once now in case the update happened before we started.
         // Delivered on the main queue by request: where AppKit posts these is convention, not
         // contract, and an off-main delivery into main-actor code would trap.
-        automationLock = AutomationLock.acquire()
+        switch AutomationLock.take() {
+        case .acquired(let descriptor): automationLock = descriptor
+        case .heldElsewhere: automationLock = nil
+        case .unavailable: automationLock = nil; automationLockUnavailable = true
+        }
         let workspace = NSWorkspace.shared.notificationCenter
         workspace.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             let bundleID = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
@@ -117,9 +149,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         promptForClaudeAppIfMissing()
         reconcileUpdateBlock()
         outsideTriggerForReopen()
+        recoverInterruptedCopies()
+        showWelcomeOnFirstLaunch()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
+    /// Opening the app again while it is running lands here. With no Dock icon, and a menu bar
+    /// icon that macOS hides when the bar is full, this is the one handle on the app that
+    /// always exists — so it answers with a window (or, if an alert is up, with the alert).
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWelcome()
+        return false
+    }
 
     // MARK: - NSMenuDelegate
 
@@ -131,6 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         blockedUpdate = UpdateProbe.status(appPath: config.claudeAppPath).blocked
         usage = Self.readUsage(for: config.profiles)
         refreshSignInStates()
+        refreshSessions()
         rebuild(menu)
     }
 
@@ -153,10 +196,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             autoReopenNotice = nil
             autoReopenNoticeWasShown = false
         }
+        if copyNoticeWasShown {
+            copyNotes = []
+            copyNoticeWasShown = false
+        }
     }
 
-    private func rebuild(_ menu: NSMenu) {
-        let input = MenuBuilder.Input(
+    private func menuInput() -> MenuBuilder.Input {
+        MenuBuilder.Input(
             config: config,
             running: running,
             signInStates: signInStates,
@@ -168,9 +215,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateProgress: updateProgress,
             usage: usage,
             now: Date(),
-            autoReopenNotice: autoReopenNotice
+            autoReopenNotice: autoReopenNotice,
+            cliIsMissing: cliIsMissing,
+            sessions: sessionData,
+            copyProgress: copyProgress,
+            copyNotes: copyNotes
         )
+    }
+
+    private func rebuild(_ menu: NSMenu) {
+        let input = menuInput()
         if isMenuOpen, autoReopenNotice != nil { autoReopenNoticeWasShown = true }
+        if isMenuOpen, !copyNotes.isEmpty { copyNoticeWasShown = true }
         let built = MenuBuilder.build(input, target: self, actions: Self.actions)
         // An NSMenuItem belongs to one menu, so detach before re-parenting.
         let items = built.items
@@ -246,7 +302,182 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Resolves the claude CLI two ways and warns once per run if neither is present.
+    // MARK: - Sessions
+
+    /// The automation lock decides more than automation: only the switcher holding it may copy
+    /// a session or clean up after an interrupted copy, so two switchers can never do either at once.
+    private var copyEnvironment: SessionCopy.Environment {
+        var environment = SessionCopy.Environment.live
+        environment.holdsAutomationLock = automationLock != nil
+        environment.lockFileUnavailable = automationLockUnavailable
+        return environment
+    }
+
+    /// Reads every account's session list off the main thread and caches it for the menu, the
+    /// way the Keychain probe does: tens of milliseconds of file I/O that opening the menu
+    /// must not wait for. Read-only.
+    private func refreshSessions() {
+        guard !isReadingSessions else {
+            sessionsRereadWanted = true
+            return
+        }
+        isReadingSessions = true
+        sessionsRereadWanted = false
+        let profiles = config.profiles
+        let environment = copyEnvironment
+        Task.detached(priority: .userInitiated) {
+            let data = SessionMenuData.read(profiles: profiles, environment: environment)
+            await MainActor.run { self.applySessions(data) }
+        }
+    }
+
+    private func applySessions(_ data: SessionMenuData) {
+        isReadingSessions = false
+        if sessionsRereadWanted { refreshSessions() }
+        guard data != sessionData else { return }
+        sessionData = data
+        // Only the Sessions submenus change; the rest of an open menu stays put under the cursor.
+        if isMenuOpen, let menu = statusItem?.menu {
+            SessionMenu.update(in: menu, input: menuInput(), target: self, action: Self.actions.copySession)
+        }
+    }
+
+    /// At launch: finish or clean up what a copy that did not finish left. It acts only on what
+    /// its own journal names, and does nothing in a switcher that does not hold the lock. What
+    /// it did is one line in the next menu, with the notes in its tooltip and in Diagnostics.
+    private func recoverInterruptedCopies() {
+        guard automationLock != nil, configError == nil else { return }
+        let profiles = config.profiles
+        let environment = copyEnvironment
+        Task.detached(priority: .utility) {
+            let notes = SessionCopy.recover(allProfiles: profiles, environment: environment)
+            await MainActor.run {
+                self.lastRecoveryNotes = notes
+                guard !notes.isEmpty else { return }
+                self.copyNotes = notes
+                self.copyNoticeWasShown = false
+                self.rebuildIfVisible()
+                self.refreshSessions()
+            }
+        }
+    }
+
+    /// The only way a session is ever copied: this menu item, then an explicit confirmation.
+    @objc private func copySession(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? SessionCopyChoice,
+              copyProgress == nil, !isPresentingModal else { return }
+        reloadConfig()
+        guard let shownSource = config.profile(id: choice.sourceProfileID),
+              let shownTarget = config.profile(id: choice.targetProfileID) else {
+            NSSound.beep()   // an account was removed since the menu was built
+            return
+        }
+
+        // What the copy is and when it shows up go in the alert itself; everything else it is
+        // and is not goes underneath in full, scrollable rather than cut.
+        let caveats = SessionCopy.confirmationCaveats(sourceLabel: shownSource.label, targetLabel: shownTarget.label, cwd: choice.cwd)
+        let alert = NSAlert()
+        alert.messageText = "Copy \u{201C}\(SessionMenu.shortened(choice.title))\u{201D} to \(shownTarget.label)?"
+        alert.informativeText = caveats.prefix(2).joined(separator: "\n\n")
+        if caveats.count > 2 {
+            alert.accessoryView = Self.readingView(
+                caveats.dropFirst(2).map { "\u{2022} " + $0 }.joined(separator: "\n\n"),
+                size: NSSize(width: 440, height: 170))
+        }
+        alert.addButton(withTitle: "Copy")
+        alert.addButton(withTitle: "Cancel")
+        guard runModal(alert) == .alertFirstButtonReturn else { return }
+        // Main-actor work keeps running underneath a modal; another copy may have started.
+        guard copyProgress == nil else { return }
+        // So does the menu: an account may have been removed, renamed or re-pointed meanwhile.
+        // Copy only between the very accounts that were confirmed, under their current names.
+        reloadConfig()
+        guard let (source, target) = CopyResult.stillTheConfirmedPair(
+                  in: config, sourceID: choice.sourceProfileID, targetID: choice.targetProfileID,
+                  confirmed: (shownSource, shownTarget))
+        else {
+            presentAlert(style: .warning, title: "Nothing was copied",
+                         message: "The accounts changed while the confirmation was open; nothing was copied.")
+            return
+        }
+
+        copyProgress = "Copying \u{201C}\(SessionMenu.shortened(choice.title))\u{201D} to \(target.label)\u{2026}"
+        rebuildIfVisible()
+
+        let request = SessionCopy.Request(source: source, target: target, sessionID: choice.sessionID,
+                                          cliSessionId: choice.cliSessionId, cwd: choice.cwd)
+        let profiles = config.profiles
+        let environment = copyEnvironment
+        let title = choice.title
+        Task.detached(priority: .userInitiated) {
+            let outcome = SessionCopy.copy(request, allProfiles: profiles, environment: environment)
+            await MainActor.run { self.copyDidFinish(outcome, title: title, source: source, target: target) }
+        }
+    }
+
+    /// A scrollable block of plain text for an alert that has more to say than fits its body.
+    private static func readingView(_ text: String, size: NSSize) -> NSView {
+        let textView = NSTextView(frame: NSRect(origin: .zero, size: size))
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        textView.textColor = .secondaryLabelColor
+        textView.string = text
+        textView.textContainerInset = NSSize(width: 2, height: 4)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(width: size.width, height: .greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+
+        let scrollView = NSScrollView(frame: NSRect(origin: .zero, size: size))
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    private func copyDidFinish(_ outcome: SessionCopy.Outcome, title: String, source: Profile, target: Profile) {
+        switch outcome {
+        case .copied:
+            presentCopyResult(outcome, title: title, source: source, target: target, notes: [])
+        case .refused, .pendingRegistration:
+            // A refusal can leave staged files behind (one that could not be proven its own),
+            // and a copy left for registration is usually finished within seconds: run recovery
+            // first, off the main thread, and say all of it in one alert. The progress line
+            // stays up meanwhile, so no other copy starts.
+            guard automationLock != nil, configError == nil else {
+                presentCopyResult(outcome, title: title, source: source, target: target, notes: [])
+                return
+            }
+            let profiles = config.profiles
+            let environment = copyEnvironment
+            Task.detached(priority: .userInitiated) {
+                let notes = SessionCopy.recover(allProfiles: profiles, environment: environment)
+                await MainActor.run {
+                    self.lastRecoveryNotes = notes
+                    self.presentCopyResult(outcome, title: title, source: source, target: target, notes: notes)
+                }
+            }
+        }
+    }
+
+    /// One alert for a finished copy attempt, with what recovery then did, if anything.
+    private func presentCopyResult(_ outcome: SessionCopy.Outcome, title: String, source: Profile, target: Profile,
+                                   notes: [SessionCopy.RecoveryNote]) {
+        copyProgress = nil
+        running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
+        rebuildIfVisible()
+        refreshSessions()
+
+        let alert = CopyResult.alert(for: outcome, notes: notes, title: title, source: source.label, target: target.label,
+                                     targetIsRunning: ProfileMatching.isRunning(target, in: running))
+        presentAlert(style: alert.isSuccess ? .informational : .warning, title: alert.title, message: alert.message)
+    }
+
+    /// Resolves the claude CLI two ways; if neither is present the terminal submenu says so.
     /// Note: the Desktop Code tab runs the app-managed sidecar under
     /// ~/Library/Application Support/Claude/claude-code/<version>/..., NOT the PATH binary;
     /// the PATH binary is what "Copy terminal command" drives. Startup never blocks on this.
@@ -257,20 +488,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// No alert: at first launch it landed on top of the welcome window and read as an error,
+    /// when switching Desktop accounts needs nothing but Claude.app.
     private func handleCLIProbe(_ probe: Diagnostics.CLIProbe) {
-        guard !probe.isResolved, !didWarnAboutMissingCLI else { return }
-        didWarnAboutMissingCLI = true
-        presentAlert(
-            style: .informational,
-            title: "Claude CLI not found",
-            message: """
-            No claude binary was found on your PATH, and no app-managed sidecar was found under \
-            ~/Library/Application Support/Claude/claude-code.
-
-            Switching Claude Desktop profiles still works \u{2014} that only needs Claude.app. The \
-            copied terminal commands will not run until the claude CLI is installed.
-            """
-        )
+        let missing = !probe.isResolved
+        guard missing != cliIsMissing else { return }
+        cliIsMissing = missing
+        rebuildIfVisible()
     }
 
     // MARK: - Actions: profiles
@@ -309,11 +533,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.messageText = "Claude is running, but one instance could not be identified"
             alert.informativeText = """
             \(unreadable.count == 1 ? "A running Claude process" : "\(unreadable.count) running Claude processes") \
-            did not report a command line, so Claude Switcher cannot tell which profile \
+            did not report a command line, so Claude Switcher cannot tell which account \
             \(unreadable.count == 1 ? "it belongs" : "they belong") to.
 
-            Starting \u{201C}\(profile.label)\u{201D} now could open a second window on a profile that is \
-            already in use. If a window for this profile is already open, switch to it instead.
+            Starting \u{201C}\(profile.label)\u{201D} now could open a second window on an account that is \
+            already in use. If a window for this account is already open, switch to it instead.
             """
             alert.addButton(withTitle: "Start Anyway")
             alert.addButton(withTitle: "Cancel")
@@ -381,7 +605,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func markActive(_ id: String) {
-        guard config.activeProfileId != id else { return }
+        // Not on a config that failed to load: saving would write what is in memory — the
+        // last good settings, or the defaults — over the file the user is in the middle of fixing.
+        guard configError == nil, config.activeProfileId != id else { return }
         do {
             try config.setActive(id: id)
             try config.save()
@@ -400,17 +626,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func addProfile(_ sender: NSMenuItem) {
+        promptToAddAccount()
+    }
+
+    /// Asks for a name, adds the account and opens Claude on it. Returns whether one was added.
+    @discardableResult
+    private func promptToAddAccount() -> Bool {
+        // Reachable from the welcome window too, where nothing disables the button meanwhile.
+        guard !isPresentingModal else { return false }
+        guard !isBusy else {
+            NSSound.beep()   // a launch or an update is in flight; the menu item is disabled for it
+            return false
+        }
+        guard !refuseWhileConfigIsBroken() else { return false }
+
         let alert = NSAlert()
-        alert.messageText = "Add a profile"
+        alert.messageText = "Add an account"
         alert.informativeText = """
-        A profile is a separate Claude Desktop login \u{2014} its own account for both chat and the \
-        Code tab \u{2014} that runs alongside your other profiles.
+        Name it whatever helps you tell it apart \u{2014} Work, Second, a person\u{2019}s name. Claude then \
+        opens a new window for it, where you sign in with that Claude account. It runs alongside \
+        your other accounts; nothing is signed out.
 
-        Your ~/.claude stays shared: projects, session history, skills, agents, plugins, memory \
-        and settings follow you into every profile.
+        Your ~/.claude stays shared: skills, agents, plugins, memory and settings follow you \
+        into every account. Chats and the Code tab\u{2019}s session list do not \u{2014} Claude keeps \
+        those with the account that started them, though a Code session can be copied across \
+        from the Sessions menu.
 
-        Claude opens on this profile as soon as you add it, so you can sign in to the account \
-        you want to use. Claude Switcher never handles your credentials.
+        Claude Switcher never handles your credentials.
         """
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.placeholderString = "Work"
@@ -419,9 +661,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
 
-        guard runModal(alert) == .alertFirstButtonReturn else { return }
+        guard runModal(alert) == .alertFirstButtonReturn else { return false }
         let label = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !label.isEmpty else { return }
+        guard !label.isEmpty else { return false }
 
         let slug = uniqueSlug(for: label)
         let home = NSHomeDirectory()
@@ -436,9 +678,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try config.addProfile(profile)
         } catch {
             presentAlert(style: .warning, title: "Could not add \u{201C}\(label)\u{201D}", message: error.localizedDescription)
-            return
+            return false
         }
-        saveConfig(failureTitle: "Could not save the new profile")
+        saveConfig(failureTitle: "Could not save the new account")
         if config.blockClaudeUpdates {
             // Before its first launch, so the new profile's updater never starts either.
             _ = try? UpdateBlock.apply(userDataDir: profile.userDataDir)
@@ -449,16 +691,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Launch it right away: a brand-new profile has no login yet, so this puts the user
         // straight on its sign-in screen. That is the whole point of adding one.
         beginLaunch(profile)
+        return true
     }
 
     /// Label only. The id and both directories are the profile's identity and never change.
     @objc private func renameProfile(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
+        // The status menu still opens while an alert is up; a nested modal would also reset
+        // `isPresentingModal` while the outer one is still on screen.
+        guard !isPresentingModal, !refuseWhileConfigIsBroken(),
+              let id = sender.representedObject as? String,
               let profile = config.profile(id: id) else { return }
 
         let alert = NSAlert()
         alert.messageText = "Rename \u{201C}\(profile.label)\u{201D}"
-        alert.informativeText = "Only the name in the menu changes. The profile keeps its directories, its sign-ins and its id (\(profile.id))."
+        alert.informativeText = "Only the name in the menu changes. The account keeps its directories, its sign-ins and its id (\(profile.id))."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.stringValue = profile.label
         field.placeholderString = profile.label
@@ -481,11 +727,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func removeProfile(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
+        guard !isPresentingModal, !refuseWhileConfigIsBroken(),
+              let id = sender.representedObject as? String,
               let profile = config.profile(id: id) else { return }
 
         var details = [
-            "Claude Switcher only forgets this profile. Nothing on disk is deleted \u{2014} re-adding it with the same directories restores it, still signed in."
+            "Claude Switcher only forgets this account. Nothing on disk is deleted \u{2014} re-adding it with the same directories restores it, still signed in."
         ]
         if let dir = profile.userDataDir {
             details.append("Desktop account data stays at:\n\(PathNormalizer.normalize(dir))")
@@ -495,14 +742,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         details.append("Its Keychain item is left untouched, and ~/.claude is shared \u{2014} never affected.")
         if UpdateBlock.state(userDataDir: profile.userDataDir) == .on {
-            details.append("The update-block policy file Claude Switcher wrote for it is removed, so that re-adding the profile later does not silently keep it from updating.")
+            details.append("The update-block policy file Claude Switcher wrote for it is removed, so that re-adding the account later does not silently keep it from updating.")
         }
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Remove the profile \u{201C}\(profile.label)\u{201D}?"
+        alert.messageText = "Remove the account \u{201C}\(profile.label)\u{201D}?"
         alert.informativeText = details.joined(separator: "\n\n")
-        alert.addButton(withTitle: "Remove Profile")
+        alert.addButton(withTitle: "Remove Account")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
 
@@ -522,7 +769,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Lowercased, dash-separated, unique against the existing ids. The slug also names the
-    /// auto-assigned directories, so it stays filesystem-safe.
+    /// auto-assigned directories, so it stays filesystem-safe — and its fallbacks still say
+    /// "profile": they are identifiers on disk, and an account removed and added again must
+    /// land on the directory it had.
     private func uniqueSlug(for label: String) -> String {
         var slug = ""
         var lastWasDash = true
@@ -574,20 +823,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !plan.quit.isEmpty else { return }
 
         var details = [
-            "Claude\u{2019}s installer only runs once every Claude instance has quit. With \(plan.quit.count == 1 ? "a profile" : "\(plan.quit.count) instances") open it has been waiting \u{2014} and a profile that quits itself to be updated never comes back."
+            "Claude\u{2019}s installer only runs once every Claude instance has quit. With \(plan.quit.count == 1 ? "an account" : "\(plan.quit.count) instances") open it has been waiting \u{2014} and an account that quits itself to be updated never comes back."
         ]
         if !plan.reopen.isEmpty {
             details.append("Will quit, then reopen:  \(plan.reopen.map(\.label).joined(separator: ", "))")
         }
         if !plan.strays.isEmpty {
-            details.append("Will quit and NOT reopen:  \(plan.strays.count) unrecognized instance\(plan.strays.count == 1 ? "" : "s") (no profile to reopen \(plan.strays.count == 1 ? "it" : "them") from)")
+            details.append("Will quit and NOT reopen:  \(plan.strays.count) unrecognized instance\(plan.strays.count == 1 ? "" : "s") (no account to reopen \(plan.strays.count == 1 ? "it" : "them") from)")
         }
         details.append("Anything Claude is doing right now \u{2014} a response being written, a task running in the Code tab \u{2014} is interrupted, as with any quit.")
         details.append("Claude Switcher only asks Claude to quit, the same as \u{2318}Q. The update itself is installed by Claude\u{2019}s own installer.")
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Quit every Claude profile to install Claude \(update.staged)?"
+        alert.messageText = "Quit Claude on every account to install Claude \(update.staged)?"
         alert.informativeText = details.joined(separator: "\n\n")
         alert.addButton(withTitle: "Quit All & Install")
         alert.addButton(withTitle: "Cancel")
@@ -662,31 +911,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
 
         case .notInstalled(let notReopened):
-            var message = "Every profile quit, but Claude\u{2019}s installer finished without changing the app \u{2014} it is still \(update.installed). Claude will try again at its next update check."
+            var message = "Every account quit, but Claude\u{2019}s installer finished without changing the app \u{2014} it is still \(update.installed). Claude will try again at its next update check."
             message += notReopened.isEmpty
-                ? "\n\nYour profiles were reopened."
+                ? "\n\nYour accounts were reopened."
                 : "\n\nCould not reopen: \(list(notReopened)). Open \(notReopened.count == 1 ? "it" : "them") from the menu."
             presentAlert(style: .warning, title: "The update did not install", message: message)
 
         case .quitTimedOut(let stillRunning, let closed):
             var message = "\(describe(stillRunning)) did not quit within a minute \u{2014} Claude may be showing a dialog of its own. Once it has quit, the update installs by itself."
             if !closed.isEmpty {
-                message += "\n\nNothing was reopened, because the installer may start the moment that happens. Closed: \(list(closed)). Give the update a few seconds after the last profile quits, then open \(closed.count == 1 ? "it" : "them") from the menu."
+                message += "\n\nNothing was reopened, because the installer may start the moment that happens. Closed: \(list(closed)). Give the update a few seconds after the last account quits, then open \(closed.count == 1 ? "it" : "them") from the menu."
             }
-            presentAlert(style: .warning, title: "Not every Claude profile quit", message: message)
+            presentAlert(style: .warning, title: "Claude did not quit on every account", message: message)
 
         case .updaterStuck:
             presentAlert(
                 style: .warning,
                 title: "Claude\u{2019}s installer has not finished",
-                message: "Every profile quit, but the installer is still running after three minutes. Nothing was reopened, so the app is not replaced underneath a running profile. Open your profiles from the menu once it is done \u{2014} Diagnostics shows whether the installer is still running."
+                message: "Every account quit, but the installer is still running after three minutes. Nothing was reopened, so the app is not replaced underneath a running account. Open your accounts from the menu once it is done \u{2014} Diagnostics shows whether the installer is still running."
             )
 
         case .quitRefused:
             presentAlert(
                 style: .warning,
                 title: "Claude did not accept the request to quit",
-                message: "Nothing was quit and nothing was changed. Quit every Claude profile yourself and the update installs by itself."
+                message: "Nothing was quit and nothing was changed. Quit Claude on every account yourself and the update installs by itself."
             )
 
         case .changedSinceConfirmation:
@@ -789,11 +1038,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// A config that failed to load is showing "the last good settings" — at first launch, the
-    /// defaults. Saving a toggle then would write those over the user's file.
+    /// defaults. Saving anything then would write those over the user's file.
     private func refuseWhileConfigIsBroken() -> Bool {
         guard let configError else { return false }
         presentAlert(style: .warning, title: "Fix the config file first",
-                     message: "\(Config.configURL.path) could not be read, so this setting was not changed:\n\n\(configError)")
+                     message: "\(Config.configURL.path) could not be read, so nothing was changed:\n\n\(configError)")
         return true
     }
 
@@ -816,8 +1065,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.alertStyle = .warning
             alert.messageText = "Stop Claude from updating itself?"
             alert.informativeText = """
-            Claude Desktop will no longer download or install updates on any profile, so it will \
-            stop closing itself to update. It applies the next time each profile starts; nothing \
+            Claude Desktop will no longer download or install updates on any account, so it will \
+            stop closing itself to update. It applies the next time each account starts; nothing \
             is quit to apply it.
 
             What you give up until you turn this off again:
@@ -826,10 +1075,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             \u{2022} \u{201C}Check for Updates\u{2026}\u{201D} disappears from Claude\u{2019}s menu.
             \u{2022} An update Claude has already downloaded still installs.
 
-            To update: turn this off and restart a profile.
+            To update: turn this off and restart an account.
 
             How: Claude Switcher writes one small policy file, which Claude itself reads, next to \
-            each profile\u{2019}s data folder. It never touches a policy it did not create.
+            each account\u{2019}s data folder. It never touches a policy it did not create.
             """
             alert.addButton(withTitle: "Block Updates")
             alert.addButton(withTitle: "Cancel")
@@ -863,7 +1112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !leftAlone.isEmpty else { return }
         presentAlert(
             style: .warning,
-            title: blocked ? "Updates could not be blocked for every profile" : "The block could not be lifted for every profile",
+            title: blocked ? "Updates could not be blocked for every account" : "The block could not be lifted for every account",
             message: leftAlone.joined(separator: "\n\n") + "\n\nClaude Switcher only ever writes or removes a policy it created itself."
         )
     }
@@ -890,6 +1139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func chooseClaudeApp(_ sender: NSMenuItem?) {
+        guard !refuseWhileConfigIsBroken() else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose Claude.app"
         panel.prompt = "Choose"
@@ -912,11 +1162,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             presentAlert(
                 style: .informational,
                 title: "~/.claude does not exist yet",
-                message: "It appears the first time Claude Code runs. Every profile will share it."
+                message: "It appears the first time Claude Code runs. Every account will share it."
             )
             return
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: - Welcome window
+
+    private func showWelcomeOnFirstLaunch() {
+        let defaults = UserDefaults.standard
+        let decision = Onboarding.firstLaunch(alreadyShown: defaults.bool(forKey: Self.welcomeShownKey),
+                                              accountCount: config.profiles.count,
+                                              configLoaded: configError == nil)
+        if decision.remembers { defaults.set(true, forKey: Self.welcomeShownKey) }
+        if decision.showsWelcome { showWelcome() }
+    }
+
+    @objc private func showWelcome(_ sender: NSMenuItem) {
+        showWelcome()
+    }
+
+    private func showWelcome() {
+        // The status menu still opens while an alert is up, and so does the app from Finder.
+        // The alert is what needs answering; bring it forward rather than a window behind it.
+        guard !isPresentingModal else {
+            NSApp.activate()
+            return
+        }
+        reloadConfig()
+        // With a config that failed to load, what is in memory is not the user's accounts:
+        // say nothing about them, and do not make adding one the obvious next step.
+        let configLoaded = configError == nil
+        let content = WelcomeWindowController.Content(
+            defaultAccountLabel: configLoaded ? config.profiles.first(where: \.isDefaultProfile)?.label : nil,
+            suggestsAddingAccount: configLoaded && config.profiles.count <= 1,
+            hasMenuBarSettings: ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+        )
+        let actions = WelcomeWindowController.Actions(
+            addAccount: { [weak self] in
+                guard let self else { return }
+                // The window may have been open a while; act on the file as it is now.
+                self.reloadConfig()
+                guard self.promptToAddAccount() else { return }
+                // Claude is opening on the new account's sign-in screen; get out of its way.
+                self.welcomeWindow?.close()
+            },
+            showMenu: { [weak self] view in self?.popUpMenu(under: view) }
+        )
+        // Rebuilt each time it is shown, so it describes the accounts as they are at that moment.
+        welcomeWindow?.close()
+        let controller = WelcomeWindowController(content: content, actions: actions)
+        welcomeWindow = controller
+        NSApp.activate()
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        // Activation is only a request (a login-item launch, another app in front): the one
+        // welcome a new install gets must not open behind whatever is on screen.
+        controller.window?.orderFrontRegardless()
+    }
+
+    /// The status menu, opened somewhere other than the menu bar — for when macOS is hiding
+    /// the icon. The same menu object, filled in first: a menu whose icon is hidden has by
+    /// definition never been opened, and it is empty until it has been.
+    private func popUpMenu(under view: NSView) {
+        guard let menu = statusItem?.menu else { return }
+        menuNeedsUpdate(menu)
+        let below = view.isFlipped ? view.bounds.maxY + 6 : view.bounds.minY - 6
+        menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.minX, y: below), in: view)
+        // Tracking has ended whether or not AppKit reported it to the delegate.
+        isMenuOpen = false
     }
 
     @objc private func showDiagnostics(_ sender: NSMenuItem) {
@@ -924,13 +1240,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
         let appPath = config.claudeAppPath
         let queries = config.profiles.map { Diagnostics.ProfileQuery(id: $0.id, credDir: $0.credDir, userDataDir: $0.userDataDir) }
+        let profiles = config.profiles
+        let environment = copyEnvironment
 
         Task {
-            let probe = await Task.detached(priority: .userInitiated) {
-                Diagnostics.probe(appPath: appPath, profiles: queries)
+            let (probe, sessions) = await Task.detached(priority: .userInitiated) {
+                (Diagnostics.probe(appPath: appPath, profiles: queries),
+                 SessionMenuData.read(profiles: profiles, environment: environment))
             }.value
             self.mergeSignInStates(probe.signedIn)
-            self.presentDiagnostics(Diagnostics.report(config: self.config, running: self.running, probe: probe))
+            self.presentDiagnostics(Diagnostics.report(config: self.config, running: self.running, probe: probe, sessions: sessions,
+                                                       recoveryNotes: self.lastRecoveryNotes))
         }
     }
 

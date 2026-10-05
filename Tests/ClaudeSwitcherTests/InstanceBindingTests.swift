@@ -1,3 +1,4 @@
+import CoreServices
 import XCTest
 @testable import ClaudeSwitcherCore
 
@@ -116,6 +117,104 @@ final class InstanceBindingTests: XCTestCase {
     func testInstanceForAnUnconfiguredDirectoryIsUnmatched() {
         let running = [RunningInstance(pid: 7, profile: .directory("/tmp/Claude-Gone"))]
         XCTAssertEqual(ProfileMatching.unmatched(running, profiles: [defaultProfile, workProfile]).map(\.pid), [7])
+    }
+
+    // MARK: - Showing a running instance's window
+
+    /// The event must be the Dock's "reopen" and must name one process. Every profile is the
+    /// same bundle, so an event addressed any other way reaches whichever instance
+    /// LaunchServices picks — the wrong account's window, reported as a successful switch.
+    func testReopenEventIsTheDockReopenAddressedToOneProcess() {
+        let event = InstanceManager.reopenEvent(forPID: 4242)
+        XCTAssertEqual(event.eventClass, AEEventClass(kCoreEventClass))
+        XCTAssertEqual(event.eventID, AEEventID(kAEReopenApplication))
+
+        let target = event.attributeDescriptor(forKeyword: AEKeyword(keyAddressAttr))
+        XCTAssertEqual(target?.descriptorType, DescType(typeKernelProcessID))
+        XCTAssertEqual(target?.data.withUnsafeBytes { $0.loadUnaligned(as: pid_t.self) }, 4242)
+    }
+
+    /// Never waited on, and never allowed to raise a permission dialog from a menu click.
+    /// (`kAEWaitReply` is 3 and contains the `kAENoReply` bit, hence the exact comparison.)
+    func testReopenIsSentWithoutWaitingAndWithoutEverPrompting() {
+        let mode = InstanceManager.reopenSendMode
+        XCTAssertEqual(mode & AESendMode(kAEWaitReply), AESendMode(kAENoReply))
+        XCTAssertNotEqual(mode & AESendMode(kAEDoNotPromptForUserConsent), 0)
+    }
+
+    /// Asking is best effort: a process that is gone is a refusal, never a throw or a hang —
+    /// and the refusal is kept, because nothing else would ever show it.
+    func testReopenRequestToAProcessThatIsGoneReportsFailure() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try process.run()
+        process.waitUntilExit()
+
+        let status = InstanceManager.requestReopen(pid: process.processIdentifier)
+        XCTAssertNotEqual(status, noErr)
+        XCTAssertEqual(InstanceManager.lastReopenAttempt?.pid, process.processIdentifier)
+        XCTAssertEqual(InstanceManager.lastReopenAttempt?.status, status)
+        XCTAssertEqual(InstanceManager.lastReopenAttempt?.wasSent, false)
+    }
+
+    // MARK: - Activation order
+
+    /// Records what `activate` did to a stand-in application, in order.
+    private final class ActivationLog {
+        var events: [String] = []
+        func candidate(bundleID: String?, activates: Bool = true) -> InstanceManager.Candidate {
+            InstanceManager.Candidate(bundleIdentifier: bundleID, activate: {
+                self.events.append("activate")
+                return activates
+            })
+        }
+        func reopen(_ pid: pid_t) { events.append("reopen \(pid)") }
+    }
+
+    func testARunningInstanceIsAskedForItsWindowAndThenActivated() {
+        let log = ActivationLog()
+        let worked = InstanceManager.activate(pid: 7, expecting: "com.example.claude",
+                                              lookup: { _ in log.candidate(bundleID: "com.example.claude") },
+                                              requestReopen: log.reopen)
+        XCTAssertTrue(worked)
+        XCTAssertEqual(log.events, ["reopen 7", "activate"])
+    }
+
+    /// The pid-reuse guard: a pid that now belongs to some other app is sent nothing at all.
+    func testAPidThatNowBelongsToAnotherAppIsNeitherAskedNorActivated() {
+        let log = ActivationLog()
+        let worked = InstanceManager.activate(pid: 7, expecting: "com.example.claude",
+                                              lookup: { _ in log.candidate(bundleID: "com.example.other") },
+                                              requestReopen: log.reopen)
+        XCTAssertFalse(worked)
+        XCTAssertEqual(log.events, [])
+    }
+
+    func testAPidThatIsGoneIsNeitherAskedNorActivated() {
+        let log = ActivationLog()
+        XCTAssertFalse(InstanceManager.activate(pid: 7, expecting: "com.example.claude",
+                                                lookup: { _ in nil }, requestReopen: log.reopen))
+        XCTAssertEqual(log.events, [])
+    }
+
+    /// With nothing to check the process against, it is activated as it always was — and
+    /// sent no event, because nothing proved it is Claude.
+    func testWithNoBundleIDToCheckTheInstanceIsOnlyActivated() {
+        let log = ActivationLog()
+        let worked = InstanceManager.activate(pid: 7, expecting: nil,
+                                              lookup: { _ in log.candidate(bundleID: "anything") },
+                                              requestReopen: log.reopen)
+        XCTAssertTrue(worked)
+        XCTAssertEqual(log.events, ["activate"])
+    }
+
+    func testAFailedActivationIsReportedEvenThoughTheWindowWasAskedFor() {
+        let log = ActivationLog()
+        let worked = InstanceManager.activate(pid: 7, expecting: "com.example.claude",
+                                              lookup: { _ in log.candidate(bundleID: "com.example.claude", activates: false) },
+                                              requestReopen: log.reopen)
+        XCTAssertFalse(worked)
+        XCTAssertEqual(log.events, ["reopen 7", "activate"])
     }
 
     // MARK: - Launch plan derivations

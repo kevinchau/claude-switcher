@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import os
 
 /// Which profile a running Claude.app process belongs to.
 ///
@@ -46,7 +47,7 @@ public enum InstanceManagerError: Error, LocalizedError {
         case .launchFailed(let path):
             return "Could not launch the application at \(path)."
         case .activationFailed(let pid):
-            return "Claude is already running for this profile (pid \(pid)) but could not be brought to the front."
+            return "Claude is already running for this account (pid \(pid)) but could not be brought to the front."
         }
     }
 }
@@ -156,16 +157,114 @@ public enum InstanceManager {
 
     // MARK: - Activation
 
-    /// Brings the instance with `pid` to the front. Returns whether it worked.
+    /// The two things activation needs from a running application — a seam, so the order of
+    /// the checks in ``activate(pid:expecting:lookup:requestReopen:)`` can be tested without
+    /// a real process.
+    struct Candidate {
+        var bundleIdentifier: String?
+        var activate: () -> Bool
+    }
+
+    /// Brings the instance with `pid` to the front, asking it to show its main window first.
+    /// Returns whether the activation worked.
     ///
     /// `expecting` guards against pid reuse: callers act on a snapshot taken when the menu was
     /// opened, and by the time the user clicks, that pid may belong to an unrelated process.
     /// Without the check we would focus someone else's window and report a successful switch.
     public static func activate(pid: pid_t, expecting bundleID: String? = nil) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
-        if let bundleID, app.bundleIdentifier != bundleID { return false }
-        // macOS 14+ spelling; `activate(options:)` is deprecated as of 14.0.
+        activate(
+            pid: pid,
+            expecting: bundleID,
+            lookup: { pid in
+                NSRunningApplication(processIdentifier: pid).map { app in
+                    // macOS 14+ spelling; `activate(options:)` is deprecated as of 14.0.
+                    Candidate(bundleIdentifier: app.bundleIdentifier, activate: { app.activate() })
+                }
+            },
+            // Off the main thread: a hung instance must not be able to hold up the menu, and
+            // nothing here waits for the answer.
+            requestReopen: { pid in
+                DispatchQueue.global(qos: .userInitiated).async { requestReopen(pid: pid) }
+            }
+        )
+    }
+
+    static func activate(
+        pid: pid_t,
+        expecting bundleID: String?,
+        lookup: (pid_t) -> Candidate?,
+        requestReopen: (pid_t) -> Void
+    ) -> Bool {
+        guard let app = lookup(pid) else { return false }
+        if let bundleID {
+            guard app.bundleIdentifier == bundleID else { return false }
+            // Activation alone raises the windows an app already has on screen. Claude keeps
+            // running with its main window closed, and then there is nothing to raise.
+            // Sent only to a process whose identity was just checked: with no bundle id to
+            // check against, the instance is activated and nothing else.
+            requestReopen(pid)
+        }
         return app.activate()
+    }
+
+    /// The "reopen" Apple event — the one an app receives when it is opened again while
+    /// already running, as from a click on its Dock icon — addressed to one process. Claude
+    /// Desktop (as of 2.19675.0) answers it by showing its main window: un-hiding it,
+    /// restoring it from the Dock, or creating it again if it was destroyed.
+    ///
+    /// It has to be addressed by pid. Every profile is the same bundle, so anything that names
+    /// the app instead (`NSWorkspace.openApplication`, `open -a`) reaches whichever instance
+    /// LaunchServices picks — the same wrong-account trap as in ``launch(profile:appPath:activates:completion:)``.
+    static func reopenEvent(forPID pid: pid_t) -> NSAppleEventDescriptor {
+        NSAppleEventDescriptor(
+            eventClass: AEEventClass(kCoreEventClass),
+            eventID: AEEventID(kAEReopenApplication),
+            targetDescriptor: NSAppleEventDescriptor(processIdentifier: pid),
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID)
+        )
+    }
+
+    /// How the reopen event is sent. `kAENoReply`: never waited on. `kAEDoNotPromptForUserConsent`:
+    /// a menu click must never raise a permission dialog or wait on one — if macOS wants the
+    /// user's consent for this event, the send fails instead and the instance is activated
+    /// without it.
+    static let reopenSendMode = AESendMode(kAENoReply) | AESendMode(kAEDoNotPromptForUserConsent)
+
+    /// One reopen request and what macOS made of it.
+    public struct ReopenAttempt: Equatable, Sendable {
+        public let pid: pid_t
+        /// `noErr` when the event was handed over; otherwise the refusal — for example -1743 or
+        /// -1744 (not permitted without the user's consent) or -600 (no such process).
+        public let status: OSStatus
+        public let at: Date
+
+        public var wasSent: Bool { status == noErr }
+    }
+
+    private static let lastReopen = OSAllocatedUnfairLock<ReopenAttempt?>(initialState: nil)
+
+    /// The most recent reopen request of this run, for Diagnostics. Whether macOS lets the
+    /// installed, signed app send the event is only visible there: a refusal looks exactly
+    /// like a window that chose not to appear.
+    public static var lastReopenAttempt: ReopenAttempt? { lastReopen.withLock { $0 } }
+
+    /// Asks the instance with `pid` to show its main window. The result says whether the
+    /// request was handed over — not whether a window appeared; that is the app's decision.
+    ///
+    /// Best effort: an instance that never gets the event is simply activated as before.
+    @discardableResult
+    static func requestReopen(pid: pid_t) -> OSStatus {
+        let event = reopenEvent(forPID: pid)
+        var status = OSStatus(paramErr)
+        if let descriptor = event.aeDesc {
+            var reply = AppleEvent()
+            status = AESendMessage(descriptor, &reply, reopenSendMode, Int(kAEDefaultTimeout))
+            AEDisposeDesc(&reply)
+        }
+        let attempt = ReopenAttempt(pid: pid, status: status, at: Date())
+        lastReopen.withLock { $0 = attempt }
+        return status
     }
 
     // MARK: - Quitting

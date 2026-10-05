@@ -354,7 +354,7 @@ final class UsageHistoryTests: XCTestCase {
         let series = [sample(0, fh: 40), sample(15, fh: 2), sample(30, fh: 12)]
         let tooltip = UsageText.tooltip(try XCTUnwrap(UsageReading.make(samples: series, now: at(40))), time: minutes)
         XCTAssertTrue(tooltip.contains("Estimated: the 5-hour window ends between +300m and +315m"), tooltip)
-        XCTAssertTrue(tooltip.contains("records usage only while this profile is open"), tooltip)
+        XCTAssertTrue(tooltip.contains("records usage only while this account is open"), tooltip)
     }
 
     func testEndedRowsRenderAsADashWithNoResetText() throws {
@@ -368,7 +368,7 @@ final class UsageHistoryTests: XCTestCase {
     }
 
     func testSummaryLineForAProfileWithAndWithoutHistory() throws {
-        XCTAssertEqual(UsageText.summary(nil, time: minutes), "no data yet (recorded once Claude has run on this profile)")
+        XCTAssertEqual(UsageText.summary(nil, time: minutes), "no data yet (recorded once Claude has run on this account)")
         let reading = try XCTUnwrap(UsageReading.make(samples: [sample(0, fh: 22, sd: 92)], now: at(10)))
         XCTAssertEqual(UsageText.summary(reading, time: minutes), "5h 22% \u{00B7} week 92% \u{00B7} resets by +300m (est.) \u{00B7} recorded +0m")
     }

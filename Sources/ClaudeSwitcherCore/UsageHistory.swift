@@ -364,8 +364,8 @@ public enum UsageText {
                 lines.append("The week has reset since this was recorded; the next reset is estimated by \(time(weekly.resetsBy)).")
             }
         }
-        lines.append("Reset times are estimated from this profile's own history; the exact time is not recorded locally.")
-        lines.append("Last recorded \(time(reading.sampledAt))\(age(reading.age).map { " (\($0))" } ?? ""). Claude Desktop records usage only while this profile is open, so use from claude.ai or your phone on this account shows up only then.")
+        lines.append("Reset times are estimated from this account's own history; the exact time is not recorded locally.")
+        lines.append("Last recorded \(time(reading.sampledAt))\(age(reading.age).map { " (\($0))" } ?? ""). Claude Desktop records usage only while this account is open, so use from claude.ai or your phone on this account shows up only then.")
         return lines.joined(separator: "\n")
     }
 
@@ -389,7 +389,7 @@ public enum UsageText {
 
     /// One line for Diagnostics and `--dry-run`.
     public static func summary(_ reading: UsageReading?, time: (Date) -> String) -> String {
-        guard let reading else { return "no data yet (recorded once Claude has run on this profile)" }
+        guard let reading else { return "no data yet (recorded once Claude has run on this account)" }
         var parts = reading.rows.map(UsageText.row)
         if let session = reading.session, reading.rows.contains(where: { $0.key == SessionWindow.key && $0.percent != nil }) {
             parts.append("resets by \(time(session.resetsBy)) (est.)")

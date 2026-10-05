@@ -21,15 +21,15 @@ private let usageText = """
 claude-switcher — switch between Claude Desktop accounts from the menu bar.
 
 USAGE
-  claude-switcher             Run the menu bar app (no Dock icon, no window).
-  claude-switcher --dry-run   Print the resolved launch plan for every profile, then exit.
+  claude-switcher             Run the menu bar app (no Dock icon; a welcome window the first time).
+  claude-switcher --dry-run   Print the resolved launch plan for every account, then exit.
                               Launches nothing, creates no directories, touches no state.
   claude-switcher --help      Show this message.
 
 CONFIG
   \(Config.configURL.path)
 
-HOW PROFILES DIFFER
+HOW ACCOUNTS DIFFER
   Desktop app   a separate Electron user-data dir (--user-data-dir) — its own login for
                 both chat and the Code tab. Instances run side by side.
   Terminal CLI  a separate CLAUDE_SECURESTORAGE_CONFIG_DIR credential slot, applied by
@@ -37,10 +37,17 @@ HOW PROFILES DIFFER
 
 WHAT STAYS SHARED
   ~/.claude — projects, session history, skills, agents, plugins, memory, settings and
-  CLAUDE.md — is shared by every profile. claude-switcher never sets CLAUDE_CONFIG_DIR,
+  CLAUDE.md — is shared by every account. claude-switcher never sets CLAUDE_CONFIG_DIR,
   never sets CLAUDE_CODE_OAUTH_TOKEN, and never reads or writes Keychain secrets (it only
-  checks whether a credential item exists). Usage shown per profile is read from that
-  profile's own plan-usage-history.json, which Claude Desktop writes; it is never fetched.
+  checks whether a credential item exists). Usage shown per account is read from that
+  account's own plan-usage-history.json, which Claude Desktop writes; it is never fetched.
+
+WHAT DOES NOT
+  Conversations. Chats live with each account on claude.ai, and Claude Desktop keeps the
+  Code tab's session list per account inside each user-data dir. The transcripts are in
+  ~/.claude, but an account's list only shows the sessions that account started.
+  The menu's Sessions submenu can copy one Code session to another account: an independent
+  copy, which that account's Claude lists the next time it starts.
 """
 
 /// Prints the launch plan without touching anything. Returns the process exit code.
@@ -93,7 +100,7 @@ if commandLineArguments.contains("--dry-run") {
 // the isolation we already have is both correct and the narrowest fix.
 MainActor.assumeIsolated {
     let application = NSApplication.shared
-    application.setActivationPolicy(.accessory)   // menu bar only: no Dock tile, no main window
+    application.setActivationPolicy(.accessory)   // menu bar only: no Dock tile
     let appDelegate = AppDelegate()
     application.delegate = appDelegate
     application.run()

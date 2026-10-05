@@ -6,9 +6,12 @@ import PackageDescription
 //                                  KeychainProbe, ProcessArgs, InstanceManager,
 //                                  LaunchPlanning, UpdateProbe, UpdateInstaller,
 //                                  LoginItem, UsageHistory, UpdateReopen, UpdateBlock,
-//                                  AutomationLock)
+//                                  AutomationLock, Onboarding, SessionCatalog,
+//                                  SessionRegistry, SessionCopy and its parts:
+//                                  HeldDirectory, TranscriptScan, CopyRecord,
+//                                  CopyJournal, CopyRun, CopyRecovery, StoreSurvey)
 //   Sources/ClaudeSwitcher      -> AppKit UI shell (main.swift, AppDelegate,
-//                                  MenuBuilder, Diagnostics)
+//                                  MenuBuilder, SessionMenu, Diagnostics, WelcomeWindow)
 //   Tests/ClaudeSwitcherTests   -> tests, importing ClaudeSwitcherCore
 //
 // The executable target is deliberately thin: a test target cannot import an

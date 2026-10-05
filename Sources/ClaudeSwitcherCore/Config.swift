@@ -99,23 +99,23 @@ public enum ConfigError: Error, LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .duplicateID(let id):
-            return "A profile with the id “\(id)” already exists."
+            return "An account with the id “\(id)” already exists."
         case .unknownProfile(let id):
-            return "There is no profile with the id “\(id)”."
+            return "There is no account with the id “\(id)”."
         case .cannotRemoveDefaultProfile:
-            return "The default profile cannot be removed."
+            return "The default account cannot be removed."
         case .duplicateDefaultProfile:
-            return "There is already a default profile. A new profile needs its own application data directory."
+            return "There is already a default account. A new account needs its own application data directory."
         case .reservedUserDataDir(let dir, let why):
-            return "\(dir) cannot be used as a profile directory: it is \(why)."
+            return "\(dir) cannot be used as an account\u{2019}s data directory: it is \(why)."
         case .cannotRemoveActiveProfile(let id):
-            return "“\(id)” is the active profile. Switch to another profile before removing it."
+            return "“\(id)” is the active account. Switch to another account before removing it."
         case .duplicateUserDataDir(let dir):
-            return "Another profile already uses the application data directory \(dir)."
+            return "Another account already uses the application data directory \(dir)."
         case .duplicateCredDir(let dir):
-            return "Another profile already uses the credential directory \(dir)."
+            return "Another account already uses the credential directory \(dir)."
         case .emptyLabel:
-            return "A profile needs a name."
+            return "An account needs a name."
         case .malformed(let detail):
             return "The configuration file is not valid: \(detail)"
         }
@@ -178,10 +178,10 @@ public struct Config: Codable, Equatable, Sendable {
         var seen = Set<String>()
         for profile in profiles {
             guard !profile.id.isEmpty else {
-                throw ConfigError.malformed("a profile has an empty id")
+                throw ConfigError.malformed("an entry in \u{201C}profiles\u{201D} has an empty id")
             }
             guard seen.insert(profile.id).inserted else {
-                throw ConfigError.malformed("duplicate profile id \u{201C}\(profile.id)\u{201D}")
+                throw ConfigError.malformed("duplicate id \u{201C}\(profile.id)\u{201D} in \u{201C}profiles\u{201D}")
             }
         }
 
@@ -191,7 +191,7 @@ public struct Config: Codable, Equatable, Sendable {
         if rootless.count > 1 {
             let names = rootless.map { "\u{201C}\($0.id)\u{201D}" }.joined(separator: ", ")
             throw ConfigError.malformed(
-                "profiles \(names) all omit userDataDir; only one profile may do so (it is the "
+                "\(names) all omit userDataDir; only one entry in \u{201C}profiles\u{201D} may do so (it is the "
                 + "default account). Give the others their own application data directory."
             )
         }
@@ -241,9 +241,9 @@ public struct Config: Codable, Equatable, Sendable {
         let reserved: [(path: String, why: String)] = [
             (home, "your home directory"),
             (PathNormalizer.normalize(home + "/.claude"),
-             "the shared Claude config directory that every profile depends on"),
+             "the shared Claude config directory that every account depends on"),
             (defaultUserDataDir(home: home),
-             "Claude.app\u{2019}s own default profile directory"),
+             "Claude.app\u{2019}s own default data directory"),
         ]
         for entry in reserved where entry.path == candidate {
             throw ConfigError.reservedUserDataDir(candidate, entry.why)
@@ -414,7 +414,7 @@ extension Config {
     ///   normalisation, so `~/x` and `/Users/me/x/` collide as they should.
     public mutating func addProfile(_ p: Profile) throws {
         guard !p.id.isEmpty else {
-            throw ConfigError.malformed("a profile id must not be empty")
+            throw ConfigError.malformed("an account id must not be empty")
         }
         guard profile(id: p.id) == nil else {
             throw ConfigError.duplicateID(p.id)
