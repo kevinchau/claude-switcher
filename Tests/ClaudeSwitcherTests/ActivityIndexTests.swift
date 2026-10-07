@@ -172,8 +172,14 @@ final class ActivityIndexTests: XCTestCase {
         try f.subagent(x, "agent-a1.jsonl", [A.assistant("s1", at: pdt("2026-10-05 10:01"), output: 8),
                                              A.assistant("s2", at: pdt("2026-10-05 10:02"), model: "claude-fable-5-1", output: 3)])
         let ledger = try XCTUnwrap(f.refresh().ledgers["default"])
-        let fableTokens: Double = 10.0 * 10_000 + 12.5 * 60_000 + 20.0 * 40_000 + 50.0 * 1_500
-        let fable = fableTokens / 1_000_000
+        // One term per line: a single sum of eight literals took Swift 6.1's type checker
+        // past its limit on GitHub's runner.
+        let fableInput: Double = 10.0 * 10_000
+        let fableOutput: Double = 12.5 * 60_000
+        let fableCacheWrite: Double = 20.0 * 40_000
+        let fableFilledIn: Double = 50.0 * 1_500
+        let fableTokens: Double = fableInput + fableOutput + fableCacheWrite + fableFilledIn
+        let fable: Double = fableTokens / 1_000_000
         XCTAssertEqual(total(ledger), A.opusSpend(output: 880) + fable, accuracy: 1e-12)
         XCTAssertEqual(ledger.buckets.first?.subagentCalls, 2)
         XCTAssertEqual(ledger.buckets.first?.subagentSpend ?? 0, total(ledger), accuracy: 1e-12)
