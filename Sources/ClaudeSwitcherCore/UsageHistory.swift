@@ -141,18 +141,29 @@ public struct SessionWindow: Equatable, Sendable {
     /// The `five_hour` anchor still ahead and within one window of `now` — the open window's
     /// exact end — preferring a limit hit to a cached report of the same end.
     static func exactEndAnchor(_ anchors: [LimitAnchor], now: Date) -> LimitAnchor? {
-        anchors.filter { $0.kind == .fiveHour && $0.resetsAt > now && $0.resetsAt.timeIntervalSince(now) <= length }
-            .min { ($0.resetsAt, $0.source == .transcript ? 0 : 1) < ($1.resetsAt, $1.source == .transcript ? 0 : 1) }
+        // Step by step rather than one chained expression: the type checker has a time limit,
+        // and a slower machine can hit it on a closure that compares tuples.
+        let ahead = anchors.filter { anchor in
+            anchor.kind == .fiveHour && anchor.resetsAt > now && anchor.resetsAt.timeIntervalSince(now) <= length
+        }
+        func rank(_ anchor: LimitAnchor) -> Int { anchor.source == .transcript ? 0 : 1 }
+        return ahead.min { a, b in
+            if a.resetsAt != b.resetsAt { return a.resetsAt < b.resetsAt }
+            return rank(a) < rank(b)
+        }
     }
 
     /// A five-hour limit hit Claude Code recorded after the latest sample (`after`), its reset
     /// still ahead within one window: the window is full — recorded, not estimated — until then.
     /// A cached usage body is no hit.
     static func recordedHit(_ anchors: [LimitAnchor], after latestSample: Date?, now: Date) -> LimitAnchor? {
-        anchors.filter {
-            $0.kind == .fiveHour && $0.source == .transcript && $0.resetsAt > now && $0.resetsAt.timeIntervalSince(now) <= length
-                && $0.hitAt >= (latestSample ?? .distantPast)
-        }.max { $0.hitAt < $1.hitAt }
+        let since: Date = latestSample ?? .distantPast
+        let hits = anchors.filter { anchor in
+            guard anchor.kind == .fiveHour, anchor.source == .transcript else { return false }
+            guard anchor.resetsAt > now, anchor.resetsAt.timeIntervalSince(now) <= length else { return false }
+            return anchor.hitAt >= since
+        }
+        return hits.max { a, b in a.hitAt < b.hitAt }
     }
 
     /// A recorded end of the sampled window that has passed: a `five_hour` reset Claude Code
@@ -161,8 +172,13 @@ public struct SessionWindow: Equatable, Sendable {
     /// at or before `now`. The window ended then, whatever its bound says: the bound is floored
     /// from the first sample and can lie hours after the real end.
     static func recordedEnd(of window: SessionWindow, latestSample: Date, anchors: [LimitAnchor], now: Date) -> Date? {
-        anchors.filter { $0.kind == .fiveHour && $0.resetsAt >= latestSample && $0.resetsAt <= window.resetsBy && $0.resetsAt <= now }
-            .map(\.resetsAt).min()
+        let bound: Date = window.resetsBy
+        let ends: [Date] = anchors.compactMap { anchor in
+            guard anchor.kind == .fiveHour else { return nil }
+            guard anchor.resetsAt >= latestSample, anchor.resetsAt <= bound, anchor.resetsAt <= now else { return nil }
+            return anchor.resetsAt
+        }
+        return ends.min()
     }
 
     /// This window, ended at a recorded time.

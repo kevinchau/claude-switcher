@@ -587,9 +587,10 @@ final class SwitcherNetworkSeamTests: XCTestCase {
 
 // MARK: - The real release, read-only
 
-/// The notarized v0.7.0 app in `build/` and its disk image, copied into a temporary directory
-/// and checked with the real Security framework and the real hdiutil. Skipped where they are
-/// absent. Signature checks here add `kSecCSNoNetworkAccess` so the test stays offline; the
+/// The notarized app in `build/` — whatever version was built last — and its disk image, copied
+/// into a temporary directory and checked with the real Security framework and the real hdiutil.
+/// Skipped where they are absent. Nothing here names a version: the one in `build/` is read from
+/// its own Info.plist, so a new release does not fail the tests that prove the old one. Signature checks here add `kSecCSNoNetworkAccess` so the test stays offline; the
 /// release is stapled, which is what makes that possible.
 final class SwitcherRealReleaseTests: XCTestCase {
 
@@ -642,16 +643,34 @@ final class SwitcherRealReleaseTests: XCTestCase {
         return copy
     }
 
-    private func releaseImage() throws -> String {
+    /// The version sealed into the app in `build/`, as the string its Info.plist carries.
+    private func builtVersionString() throws -> String {
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.builtApp), "no notarized build in build/")
+        let plist = NSDictionary(contentsOfFile: Self.builtApp + "/Contents/Info.plist")
+        return try XCTUnwrap(plist?["CFBundleShortVersionString"] as? String, "the built app has no version")
+    }
+
+    private func builtVersion() throws -> ReleaseVersion {
+        try XCTUnwrap(ReleaseVersion(string: try builtVersionString()), "the built app's version is not major.minor.patch")
+    }
+
+    /// The disk image that goes with the app in `build/`, with the size and digest the feed would
+    /// carry for it — measured here, not recorded, so the pair in `build/` is always the one tested.
+    private struct ReleaseImage {
+        let path: String
+        let size: Int
+        let digest: String
+    }
+
+    private func releaseImage() throws -> ReleaseImage {
         let scratch = ProcessInfo.processInfo.environment["CLAUDE_SWITCHER_TEST_DMG"]
         let candidates = [scratch, Self.repository.appendingPathComponent("build/Claude Switcher.dmg").path].compactMap { $0 }
-        guard let source = candidates.first(where: { path in
-            SwitcherDisk.fileSize(path) == ReleaseFeedFixture.v070Size
-                && SwitcherDisk.sha256Hex(path) == ReleaseFeedFixture.v070Digest
-        }) else { throw XCTSkip("the published v0.7.0 disk image is not here") }
+        guard let source = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }),
+              let size = SwitcherDisk.fileSize(source), let digest = SwitcherDisk.sha256Hex(source)
+        else { throw XCTSkip("no release disk image in build/") }
         let copy = root.appendingPathComponent("release.dmg").path
         try FileManager.default.copyItem(atPath: source, toPath: copy)
-        return copy
+        return ReleaseImage(path: copy, size: size, digest: digest)
     }
 
     func testTheBuiltAppIsThisTeamsNotarizedApp() throws {
@@ -661,7 +680,7 @@ final class SwitcherRealReleaseTests: XCTestCase {
         XCTAssertEqual(identity.identifier, "tech.local.claude-switcher")
         XCTAssertTrue(identity.hasHardenedRuntime)
         XCTAssertFalse(identity.isAdHoc)
-        XCTAssertEqual(identity.version, UpdateFixture.v070)
+        XCTAssertEqual(identity.version, try builtVersion())
         let requirement = try CodeSignature.requirementForApp(team: "FTHBLX7S63", identifier: "tech.local.claude-switcher")
         XCTAssertNoThrow(try CodeSignature.verify(bundleAt: app, requirement: requirement, flags: offline).get())
     }
@@ -762,7 +781,9 @@ final class SwitcherRealReleaseTests: XCTestCase {
         let app = try copyOfTheBuiltApp()
         let plist = app + "/Contents/Info.plist"
         var text = try String(contentsOfFile: plist, encoding: .utf8)
-        text = text.replacingOccurrences(of: "<string>0.7.0</string>", with: "<string>9.9.9</string>")
+        let sealed = try builtVersionString()
+        XCTAssertTrue(text.contains("<string>\(sealed)</string>"), "the plist does not carry the version it was read as")
+        text = text.replacingOccurrences(of: "<string>\(sealed)</string>", with: "<string>9.9.9</string>")
         try text.write(toFile: plist, atomically: false, encoding: .utf8)
         guard case .failure = CodeSignature.verify(bundleAt: app, requirement: nil, flags: offline) else {
             return XCTFail("an edited version passed")
@@ -770,7 +791,7 @@ final class SwitcherRealReleaseTests: XCTestCase {
     }
 
     func testTheReleaseImageIsThisTeamsAndAFlippedByteIsNot() throws {
-        let image = try releaseImage()
+        let image = try releaseImage().path
         let requirement = try CodeSignature.requirementForImage(team: "FTHBLX7S63")
         XCTAssertNoThrow(try CodeSignature.verify(bundleAt: image, requirement: requirement, flags: offline).get())
         var bytes = try Data(contentsOf: URL(fileURLWithPath: image))
@@ -786,7 +807,9 @@ final class SwitcherRealReleaseTests: XCTestCase {
     /// staging folder, strip, verify again, detach — then discard. Gatekeeper's assessment is
     /// left out (spctl may ask Apple's servers); its reading is tested above.
     func testTheRealReleasePreparesEndToEndAndLeavesNothingMounted() async throws {
-        let image = try releaseImage()
+        let release = try releaseImage()
+        let image = release.path
+        let built = try builtVersion()
         let applications = root.appendingPathComponent("Applications")
         try FileManager.default.createDirectory(at: applications.appendingPathComponent("Claude Switcher.app"),
                                                 withIntermediateDirectories: true)
@@ -813,14 +836,15 @@ final class SwitcherRealReleaseTests: XCTestCase {
         }
         env.assess = { _ in .accepted }
         env.prewarm = { _ in }
-        let candidate = ReleaseCandidate(version: UpdateFixture.v070, assetSize: ReleaseFeedFixture.v070Size,
-                                         digestHex: ReleaseFeedFixture.v070Digest, immutable: false)
+        let candidate = ReleaseCandidate(version: built, assetSize: release.size, digestHex: release.digest, immutable: false)
+        // Any version below the built one stands in for the running copy.
         let trust = SwitcherTrust(teamID: "FTHBLX7S63", identifier: "tech.local.claude-switcher", runningVersion: UpdateFixture.v060)
+        XCTAssertLessThan(UpdateFixture.v060, built, "the built app must be newer than the stand-in running copy")
 
         let prepared = try await SwitcherUpdater.prepare(candidate: candidate, trust: trust, installPath: install,
                                                          updatesDirectory: updates, env: env).get()
-        XCTAssertEqual(prepared.verifiedIdentity.version, UpdateFixture.v070)
-        XCTAssertEqual(prepared.dmgPath, updates + "/downloads/v0.7.0/Claude.Switcher.dmg")
+        XCTAssertEqual(prepared.verifiedIdentity.version, built)
+        XCTAssertEqual(prepared.dmgPath, updates + "/downloads/\(built.tag)/Claude.Switcher.dmg")
         let staging = (prepared.stagedAppPath as NSString).deletingLastPathComponent
         XCTAssertEqual((SwitcherDisk.realpath(staging)! as NSString).deletingLastPathComponent,
                        SwitcherDisk.temporaryItemsDirectory())
@@ -836,7 +860,7 @@ final class SwitcherRealReleaseTests: XCTestCase {
 
         await SwitcherUpdater.discard(prepared, updatesDirectory: updates, env: env)
         XCTAssertFalse(FileManager.default.fileExists(atPath: staging))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: updates + "/downloads/v0.7.0"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: updates + "/downloads/\(built.tag)"))
         let after = await store.load(now: Date())
         XCTAssertNil(after.staging)
     }

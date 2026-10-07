@@ -642,15 +642,23 @@ public struct UsageForecast: Equatable, Sendable {
     public func widened(unread: TimeInterval, activity: ActivityLedger) -> UsageForecast {
         guard unread > 0 else { return self }
         let through = activity.indexedThrough
-        let fastest = (0..<Int(Self.recentPaceSpan / 3600)).map { hour in
-            activity.spend(from: through.addingTimeInterval(-Double(hour + 1) * 3600), to: through.addingTimeInterval(-Double(hour) * 3600))
-        }.max() ?? 0
+        // Spelled out hour by hour: a closure over this arithmetic took the type checker past
+        // its limit on a slower machine (GitHub's runner), which fails the build outright.
+        let hourCount = Int(Self.recentPaceSpan / 3600)
+        var fastest: Double = 0
+        for hour in 0..<hourCount {
+            let end: Date = through.addingTimeInterval(-3600 * Double(hour))
+            let start: Date = end.addingTimeInterval(-3600)
+            fastest = max(fastest, activity.spend(from: start, to: end))
+        }
         guard fastest > 0 else { return self }
-        let hours = unread / 3600
-        let week = Estimate(value: weekUsed.value, low: weekUsed.low, high: min(100, weekUsed.high + calibration.weekly * fastest * hours),
+        let hours: Double = unread / 3600
+        let extraWeek: Double = calibration.weekly * fastest * hours
+        let extraWindow: Double = calibration.window * fastest * hours
+        let week = Estimate(value: weekUsed.value, low: weekUsed.low, high: min(100, weekUsed.high + extraWeek),
                             basis: weekUsed.basis)
         let fiveHour = Estimate(value: windowUsed.value, low: windowUsed.low,
-                                high: min(100, windowUsed.high + calibration.window * fastest * hours), basis: windowUsed.basis)
+                                high: min(100, windowUsed.high + extraWindow), basis: windowUsed.basis)
         return UsageForecast(
             profileID: profileID, reading: reading, schedule: schedule, weekUsed: week,
             headroom: Estimate(value: headroom.value, low: 100 - week.high, high: headroom.high, basis: headroom.basis),
