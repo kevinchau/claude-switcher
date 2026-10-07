@@ -325,8 +325,12 @@ final class UsageForecastTests: XCTestCase {
         let light = make([reset, sample("2026-10-04 10:00", sd: 8)], ledger, now: pdt("2026-10-04 10:00"))
         XCTAssertNil(light.paceWeek, "8 points")
         let both = make([reset, sample("2026-10-04 10:00", sd: 15)], ledger, now: pdt("2026-10-04 10:00"))
-        XCTAssertEqual(both.paceWeek ?? 0, 15 / 13, accuracy: 1e-9)
-        XCTAssertEqual(both.waste, Int((100 - (15 + 15.0 / 13 * 155)).rounded()))
+        let paceAfterThirteenHours: Double = 15.0 / 13.0
+        XCTAssertEqual(both.paceWeek ?? 0, paceAfterThirteenHours, accuracy: 1e-9)
+        // 15 points used, 155 hours of the week still to come at that pace.
+        let projected: Double = 15.0 + paceAfterThirteenHours * 155.0
+        let expectedWaste: Int = Int((100.0 - projected).rounded())
+        XCTAssertEqual(both.waste, expectedWaste)
     }
 
     /// Christy on Wed 09-30 17:17, 60 hours into her week: the week's pace alone runs out on

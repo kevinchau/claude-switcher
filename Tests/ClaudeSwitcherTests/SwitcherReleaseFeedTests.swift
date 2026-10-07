@@ -5,6 +5,22 @@ import XCTest
 /// file may be fetched from. Every answer here is recorded or made up; nothing is fetched.
 final class SwitcherReleaseFeedTests: XCTestCase {
 
+    /// The recorded release with one top-level field changed (`nil` removes it). A typed
+    /// parameter, not a closure over an untyped literal: on Swift 6.1 the latter took the type
+    /// checker past its limit inside a generic assertion.
+    private func release(_ key: String, _ value: Any?) -> Data {
+        ReleaseFeedFixture.release { fields in
+            if let value { fields[key] = value } else { fields.removeValue(forKey: key) }
+        }
+    }
+
+    /// The recorded asset with one field changed (`nil` removes it).
+    private func asset(_ key: String, _ value: Any?) -> Data {
+        ReleaseFeedFixture.asset { fields in
+            if let value { fields[key] = value } else { fields.removeValue(forKey: key) }
+        }
+    }
+
     private let now = Date(timeIntervalSince1970: 1_791_000_000)
 
     private func v(_ text: String) -> ReleaseVersion { ReleaseVersion(string: text)! }
@@ -47,20 +63,20 @@ final class SwitcherReleaseFeedTests: XCTestCase {
     }
 
     func testDraftsPrereleasesAndUnmarkedReleasesAreRefused() {
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["draft"] = true }), .draft)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["prerelease"] = true }), .prerelease)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["draft"] = nil }), .draft)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["prerelease"] = nil }), .prerelease)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["draft"] = "false" }), .draft)
+        XCTAssertEqual(refusal(release("draft", true)), .draft)
+        XCTAssertEqual(refusal(release("prerelease", true)), .prerelease)
+        XCTAssertEqual(refusal(release("draft", nil)), .draft)
+        XCTAssertEqual(refusal(release("prerelease", nil)), .prerelease)
+        XCTAssertEqual(refusal(release("draft", "false")), .draft)
     }
 
     func testOnlyAPlainVMajorMinorPatchTagIsAVersion() {
         for tag in ["v0.8", "0.8.0", "v0.8.0-rc1", "v01.0.0", "v0.08.0", "v0.8.0 ", "V0.8.0", "v0.8.0\n", "v+1.0.0",
                     "v\u{0660}.1.0", "v0.\u{0661}.0", "v0.1.\u{FF11}", "v1\u{0660}.0.0", "v0.1\u{0661}.0", "v0.0.1\u{0967}",
                     "v99999999999999999999.0.0", ""] {
-            XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["tag_name"] = tag }), .badTag(tag), tag)
+            XCTAssertEqual(refusal(release("tag_name", tag)), .badTag(tag), tag)
         }
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["tag_name"] = nil }), .badTag(""))
+        XCTAssertEqual(refusal(release("tag_name", nil)), .badTag(""))
         XCTAssertEqual(ReleaseVersion(tag: "v10.0.12"), ReleaseVersion(major: 10, minor: 0, patch: 12))
     }
 
@@ -74,24 +90,29 @@ final class SwitcherReleaseFeedTests: XCTestCase {
     }
 
     func testExactlyOneUploadedAssetOfTheRightNameAndSizeWithASHA256Digest() {
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release { $0["assets"] = [] }), .noAsset)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["name"] = "Claude Switcher.dmg" }), .noAsset)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.release {
-            $0["assets"] = [ReleaseFeedFixture.recordedAsset, ReleaseFeedFixture.recordedAsset]
-        }), .duplicateAsset)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["state"] = "open" }), .assetNotUploaded)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["state"] = nil }), .assetNotUploaded)
-        XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["size"] = 0 }), .assetSizeOutOfRange(0))
-        XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["size"] = 50_000_001 }), .assetSizeOutOfRange(50_000_001))
-        XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["size"] = -1 }), .assetSizeOutOfRange(-1))
-        let hex = ReleaseFeedFixture.v070Digest
-        for digest: Any in [NSNull(), "md5:" + hex, "sha256:" + hex.uppercased(), "sha256:" + hex.dropLast(),
-                            "sha256:" + hex + "0", hex, "sha512:" + hex, "sha256:" + hex + "\n"] {
-            XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["digest"] = digest }), .badDigest, "\(digest)")
+        XCTAssertEqual(refusal(release("assets", [Any]())), .noAsset)
+        XCTAssertEqual(refusal(asset("name", "Claude Switcher.dmg")), .noAsset)
+        let twice: [Any] = [ReleaseFeedFixture.recordedAsset, ReleaseFeedFixture.recordedAsset]
+        XCTAssertEqual(refusal(release("assets", twice)), .duplicateAsset)
+        XCTAssertEqual(refusal(asset("state", "open")), .assetNotUploaded)
+        XCTAssertEqual(refusal(asset("state", nil)), .assetNotUploaded)
+        // Each literal typed on its own line: a closure writing an untyped literal into a
+        // `[String: Any]`, inside a generic assertion, took the type checker past its limit on a
+        // slower machine (GitHub's runner).
+        for size: Int in [0, 50_000_001, -1] {
+            let expected: FeedError = .assetSizeOutOfRange(size)
+            XCTAssertEqual(refusal(asset("size", size)), expected, "size \(size)")
         }
-        XCTAssertEqual(refusal(ReleaseFeedFixture.asset { $0["digest"] = nil }), .badDigest)
+        let hex: String = ReleaseFeedFixture.v070Digest
+        let truncated: String = String(hex.dropLast())
+        let badDigests: [Any] = [NSNull(), "md5:" + hex, "sha256:" + hex.uppercased(), "sha256:" + truncated,
+                                 "sha256:" + hex + "0", hex, "sha512:" + hex, "sha256:" + hex + "\n"]
+        for digest in badDigests {
+            XCTAssertEqual(refusal(asset("digest", digest)), .badDigest, "\(digest)")
+        }
+        XCTAssertEqual(refusal(asset("digest", nil)), .badDigest)
         // The largest allowed size is allowed.
-        XCTAssertNoThrow(try SwitcherReleaseFeed.parse(ReleaseFeedFixture.asset { $0["size"] = 50_000_000 }).get())
+        XCTAssertNoThrow(try SwitcherReleaseFeed.parse(asset("size", 50_000_000)).get())
     }
 
     func testAnswersThatAreNotTheReleaseJSONAreRefused() {
