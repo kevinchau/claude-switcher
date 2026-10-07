@@ -54,7 +54,9 @@ enum CopyRecord {
         fields.append(("sessionPermissionUpdates", "[]"))
         fields.append(("alwaysAllowedReasons", "[]"))
 
-        return Data(("{" + fields.map { jsonString($0.0) + ":" + $0.1 }.joined(separator: ",") + "}").utf8)
+        let members: [String] = fields.map { field in jsonString(field.0) + ":" + field.1 }
+        let object: String = "{" + members.joined(separator: ",") + "}"
+        return Data(object.utf8)
     }
 
     /// The copy's title — only when the source has one with something other than whitespace.

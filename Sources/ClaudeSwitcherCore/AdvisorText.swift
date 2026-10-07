@@ -31,7 +31,11 @@ public struct UsageClock: Sendable {
         formatter.timeZone = timeZone
         formatter.setLocalizedDateFormatFromTemplate(template)
         // Recent macOS puts a narrow no-break space before "PM"; the menu text uses a plain one.
-        return formatter.string(from: date).replacingOccurrences(of: "\u{202F}", with: " ")
+        var text = formatter.string(from: date).replacingOccurrences(of: "\u{202F}", with: " ")
+        // Older macOS (15) writes "Sat, 9 PM" for a weekday template; 26 writes "Sat 9 PM". The
+        // menu's lines are measured in characters, so they get the same text on either.
+        if template.hasPrefix("EEE") { text = text.replacingOccurrences(of: ", ", with: " ") }
+        return text
     }
 
     private func fixed(_ date: Date, _ pattern: String, zone: TimeZone? = nil) -> String {
@@ -675,9 +679,15 @@ public enum AdvisorText {
             // As the week row says it: exact only when exact and fresh.
             return "\(label(id, labels)) " + (schedule.isFresh(now: clock.now) ? "exact" : "estimated")
         }
-        let ages = ids.map { id in snapshot.forecasts[id]!.reading.map { UsageClock.span(clock.now.timeIntervalSince($0.sampledAt)) } ?? "never" }
-        lines.append("Reset times: " + resets.joined(separator: ", ") + " \u{00B7} usage last recorded " + ages.joined(separator: " / ")
-                     + (ages.allSatisfy { $0 == "never" } ? "" : " ago"))
+        let ages: [String] = ids.map { id in
+            guard let reading = snapshot.forecasts[id]!.reading else { return "never" }
+            return UsageClock.span(clock.now.timeIntervalSince(reading.sampledAt))
+        }
+        // Built in pieces: one long concatenation took Swift 6.1's type checker 0.7 s.
+        let agoSuffix: String = ages.allSatisfy { $0 == "never" } ? "" : " ago"
+        var resetLine = "Reset times: " + resets.joined(separator: ", ")
+        resetLine += " \u{00B7} usage last recorded " + ages.joined(separator: " / ") + agoSuffix
+        lines.append(resetLine)
         if ids.count == 1 { lines.append("Only one account \u{2014} no reserve is possible") }
         let defaulted = snapshot.costs.short.isDefault || snapshot.costs.medium.isDefault || snapshot.costs.long.isDefault
         for id in ids {
