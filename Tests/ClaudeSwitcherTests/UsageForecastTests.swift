@@ -23,7 +23,12 @@ final class UsageForecastTests: XCTestCase {
 
     /// Calls of `spend` units each, `every` seconds apart, ending at `end`.
     private func calls(_ count: Int, spend: Double, every: TimeInterval = 600, ending end: Date) -> [(at: Date, spend: Double)] {
-        (0..<count).map { (end.addingTimeInterval(-Double(count - 1 - $0) * every), spend) }
+        var result: [(at: Date, spend: Double)] = []
+        for index in 0..<count {
+            let before: TimeInterval = Double(count - 1 - index) * every
+            result.append((at: end.addingTimeInterval(-before), spend: spend))
+        }
+        return result
     }
 
     // MARK: - The week
@@ -84,7 +89,7 @@ final class UsageForecastTests: XCTestCase {
         let ledger = F.ledger(calls(63, spend: 13.5, every: 1800, ending: now.addingTimeInterval(-60)), anchors: F.personalWeeklyAnchors)
         let f = make([UsageSample(sampledAt: reset, org: "o", utilization: ["sd": 0])], ledger, now: now)
         // 63 recorded + the 6-point floor + 2 points for each of the 1.4 days since the sample.
-        let high: Double = 63 + 6 + 2 * 1.4
+        let high = 71.8
         XCTAssertEqual(f.weekUsed.value, 63, accuracy: 0.01)
         XCTAssertEqual(f.weekUsed.high, high, accuracy: 0.01, "72, not 85")
         XCTAssertEqual(f.headroom.low, 100 - high, accuracy: 0.01)

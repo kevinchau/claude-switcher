@@ -277,9 +277,10 @@ final class UsageHistoryTests: XCTestCase {
         let series = [sample(0, sd: 60), sample(15, sd: 2), sample(day, sd: 30)]
         let reading = try XCTUnwrap(UsageReading.make(samples: series, now: at(day + 45)))
         let week = try XCTUnwrap(reading.rows.last)
-        XCTAssertEqual(UsageText.trailing(for: week, in: reading, time: minutes), "resets by +\(7 * 24 * 60 + 15)m (est.) \u{00B7} 45 min ago")
+        let weekLater = 10_095  // 7 days and 15 minutes, in minutes: the 15-minute sample, a week on
+        XCTAssertEqual(UsageText.trailing(for: week, in: reading, time: minutes), "resets by +\(weekLater)m (est.) \u{00B7} 45 min ago")
         XCTAssertTrue(UsageText.tooltip(reading, time: minutes).contains("at the same time every week"))
-        XCTAssertTrue(UsageText.summary(reading, time: minutes).contains("week resets by +\(7 * 24 * 60 + 15)m (est.)"))
+        XCTAssertTrue(UsageText.summary(reading, time: minutes).contains("week resets by +\(weekLater)m (est.)"))
     }
 
     // MARK: - Reading
