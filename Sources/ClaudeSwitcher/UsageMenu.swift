@@ -54,6 +54,7 @@ enum UsageMenu {
 
     static let advisorIdentifier = NSUserInterfaceItemIdentifier("claude-switcher.advisor")
     static let placeholderIdentifier = NSUserInterfaceItemIdentifier("claude-switcher.advisor.placeholder")
+    static let hintIdentifier = NSUserInterfaceItemIdentifier("claude-switcher.advisor.hint")
 
     static func rowIdentifier(_ size: SessionSize) -> NSUserInterfaceItemIdentifier {
         NSUserInterfaceItemIdentifier(AdvisorText.identifier(size))
@@ -150,16 +151,18 @@ enum UsageMenu {
 
     // MARK: - "Start a session in…"
 
-    static let advisorToolTip = "Which account to start a new session in, by how long it will run \u{2014} so no account is "
-        + "left without usage and none goes to waste at its reset. Estimated from each account\u{2019}s recorded usage and this "
-        + "Mac\u{2019}s Claude Code activity; hover a row for why. Choosing a row opens that account, as its row below does."
+    /// The submenu's last line: the rows read as information, and are buttons too.
+    static let hint = "Choosing a row opens that account."
 
     /// Above the accounts, under the running line. `nil` with no accounts.
+    ///
+    /// No tooltip, and none on any item that opens a submenu: from the menu bar a submenu
+    /// opens to the left, which is where the tooltip appears a moment later — on top of the
+    /// rows it was describing. What it said is in the submenu itself now.
     static func advisorItem(_ input: MenuBuilder.Input, target: AnyObject, actions: MenuBuilder.Actions) -> NSMenuItem? {
         guard !input.config.profiles.isEmpty else { return nil }
         let item = NSMenuItem(title: AdvisorMenu.title, action: nil, keyEquivalent: "")
         item.identifier = advisorIdentifier
-        item.toolTip = advisorToolTip
         let submenu = NSMenu()
         submenu.autoenablesItems = false
         for sub in advisorItems(input, target: target, actions: actions) { submenu.addItem(sub) }
@@ -180,8 +183,8 @@ enum UsageMenu {
         return !input.isBusy && input.claudeAppExists
     }
 
-    /// Three rows, each with its reason under it, then the footer — or the one placeholder
-    /// line while the activity index is absent, being built or too old.
+    /// Three rows, each with its reason under it, then the footer and the hint — or the one
+    /// placeholder line while the activity index is absent, being built or too old.
     static func advisorItems(_ input: MenuBuilder.Input, target: AnyObject, actions: MenuBuilder.Actions) -> [NSMenuItem] {
         let advice = model(input)
         guard let advice, advice.placeholder == nil, !advice.rows.isEmpty else {
@@ -210,6 +213,9 @@ enum UsageMenu {
             item.identifier = footerIdentifier(index)
             items.append(item)
         }
+        let hintItem = MenuBuilder.informationalItem(hint)
+        hintItem.identifier = hintIdentifier
+        items.append(hintItem)
         return items
     }
 

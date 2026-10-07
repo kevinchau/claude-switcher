@@ -109,13 +109,14 @@ enum SessionMenu {
     }
 
     /// The "Sessions" item that sits under an account's row. Every account has one, so the
-    /// account's name is in what VoiceOver reads and in the tooltip; the title stays short.
+    /// account's name is in what VoiceOver reads; the title stays short. No tooltip on it, nor
+    /// on the session rows: each opens a submenu, and a tooltip lands on top of a submenu that
+    /// opens to the left (see `UsageMenu.advisorItem`).
     static func item(for profile: Profile, input: MenuBuilder.Input, target: AnyObject, action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: "Sessions", action: nil, keyEquivalent: "")
         item.indentationLevel = 1
         item.identifier = itemIdentifier(profile.id)
         item.setAccessibilityLabel("\(profile.label) sessions")
-        item.toolTip = "The Code-tab sessions Claude keeps for \(profile.label). Each can be copied to another account."
         item.submenu = submenu(for: profile, input: input, target: target, action: action)
         return item
     }
@@ -161,10 +162,9 @@ enum SessionMenu {
             let title = displayTitle(session)
             let row = NSMenuItem(title: shortened(title), action: nil, keyEquivalent: "")
             row.badge = NSMenuItemBadge(string: session.isRunning ? "open" : age(session.record.lastActivityAt, now: input.now))
-            row.toolTip = toolTip(session, title: title, now: input.now)
             row.submenu = actionsMenu(for: session, title: title, source: profile, others: others,
                                       data: data, isCopying: input.copyProgress != nil || input.switcher.isCommitting,
-                                      target: target, action: action)
+                                      now: input.now, target: target, action: action)
             menu.addItem(row)
         }
 
@@ -179,10 +179,14 @@ enum SessionMenu {
 
     private static func actionsMenu(
         for session: ListedSession, title: String, source: Profile, others: [Profile],
-        data: SessionMenuData, isCopying: Bool, target: AnyObject, action: Selector
+        data: SessionMenuData, isCopying: Bool, now: Date, target: AnyObject, action: Selector
     ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+
+        // The row's particulars come first, where they cover nothing.
+        for line in details(session, title: title, now: now) { menu.addItem(MenuBuilder.informationalItem(line)) }
+        menu.addItem(.separator())
 
         if let obstacle = session.obstacle {
             menu.addItem(MenuBuilder.informationalItem("Can\u{2019}t be copied"))
@@ -246,8 +250,15 @@ enum SessionMenu {
     nonisolated static let unfinishedToolTip =
         "Claude Switcher tries again at each start. Diagnostics\u{2026} says what is left and where to look."
 
-    nonisolated static func shortened(_ title: String) -> String {
-        title.count > titleLimit ? String(title.prefix(titleLimit - 1)) + "\u{2026}" : title
+    nonisolated static func shortened(_ title: String, limit: Int = titleLimit) -> String {
+        title.count > limit ? String(title.prefix(limit - 1)) + "\u{2026}" : title
+    }
+
+    /// `~` for the home folder, and the end of a long path: the part that tells folders apart.
+    /// String work only, like `displayTitle`.
+    nonisolated static func shortenedPath(_ path: String) -> String {
+        let abbreviated = (path as NSString).abbreviatingWithTildeInPath
+        return abbreviated.count > titleLimit ? "\u{2026}" + abbreviated.suffix(titleLimit - 1) : abbreviated
     }
 
     nonisolated static func unavailableText(_ location: SessionStoreLocation, label: String) -> String {
@@ -274,15 +285,20 @@ enum SessionMenu {
         return parts.isEmpty ? nil : "Not listed: " + parts.joined(separator: ", ")
     }
 
-    static func toolTip(_ session: ListedSession, title: String, now: Date) -> String {
-        var lines = [title, "Folder: \(session.record.cwd)"]
+    /// The first lines of a session's submenu: the title in full when the row had to cut it,
+    /// then its folder, last activity, model and transcript size. A menu line cannot wrap, so
+    /// each is kept to about the row's own width.
+    static func details(_ session: ListedSession, title: String, now: Date) -> [String] {
+        var lines: [String] = []
+        if title.count > titleLimit { lines.append(shortened(title, limit: 2 * titleLimit)) }
+        lines.append("Folder: " + shortenedPath(session.record.cwd))
         if let last = session.record.lastActivityAt {
             lines.append("Last active: \(MenuBuilder.clock(last, now: now)) (\(age(last, now: now)))")
         }
         if let model = session.record.model { lines.append("Model: \(model)") }
         lines.append("Transcript: \(ByteCountFormatter.string(fromByteCount: Int64(session.transcriptBytes), countStyle: .file))")
         if session.isRunning { lines.append("Open in Claude right now.") }
-        return lines.joined(separator: "\n")
+        return lines
     }
 
     /// "just now", "12 min ago", "3 h ago", "5 d ago" — or nothing to say for a missing date.
