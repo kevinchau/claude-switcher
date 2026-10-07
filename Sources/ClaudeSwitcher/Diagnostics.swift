@@ -5,6 +5,66 @@ import ClaudeSwitcherCore
 
 public enum Diagnostics {
 
+    /// `--help`. Here rather than in main.swift, whose globals exist only once it runs.
+    static var usageText: String {
+        """
+        claude-switcher — switch between Claude Desktop accounts from the menu bar.
+
+        USAGE
+          claude-switcher             Run the menu bar app (no Dock icon; a welcome window the first time).
+          claude-switcher --dry-run   Print the resolved launch plan for every account, with its usage
+                                      and the Advisor's advice, then exit. Launches nothing, creates
+                                      no directories, touches no state.
+          claude-switcher --help      Show this message.
+
+        CONFIG
+          \(Config.configURL.path)
+
+        HOW ACCOUNTS DIFFER
+          Desktop app   a separate Electron user-data dir (--user-data-dir) — its own login for
+                        both chat and the Code tab. Instances run side by side.
+          Terminal CLI  a separate CLAUDE_SECURESTORAGE_CONFIG_DIR credential slot, applied by
+                        you in your shell via "Copy terminal command".
+
+        WHAT STAYS SHARED
+          ~/.claude — projects, session history, skills, agents, plugins, memory, settings and
+          CLAUDE.md — is shared by every account. claude-switcher never sets CLAUDE_CONFIG_DIR,
+          never sets CLAUDE_CODE_OAUTH_TOKEN, and never reads or writes Keychain secrets (it only
+          checks whether a credential item exists). Usage shown per account is read from that
+          account's own plan-usage-history.json, which Claude Desktop writes; it is never fetched.
+
+        WHAT DOES NOT
+          Conversations. Chats live with each account on claude.ai, and Claude Desktop keeps the
+          Code tab's session list per account inside each user-data dir. The transcripts are in
+          ~/.claude, but an account's list only shows the sessions that account started.
+          The menu's Sessions submenu can copy one Code session to another account: an independent
+          copy, which that account's Claude lists the next time it starts.
+
+        USAGE AND THE ADVISOR
+          The bars show what Claude recorded for each account. The grey line under them, the
+          lighter part of a bar and "Start a session in\u{2026}" are estimates: this Mac's Claude Code
+          transcripts (token counts and times only) are read into one index of numbers,
+          ~/.config/claude-switcher/activity-index.json, and weighed against what was recorded.
+          A reset time shown without "(est.)" was recorded by Claude Code; every other one is an
+          estimate. --dry-run reads that index as it is and never reads a transcript.
+
+        UPDATES
+          Claude Switcher keeps itself up to date from github.com/kevinchau/claude-switcher: every
+          few hours it asks GitHub for the latest release, checks that it is signed by the same
+          developer team and notarized by Apple, replaces itself when nothing is going on, and
+          relaunches. Only Claude Switcher \u{2014} Claude is never quit, started or updated by this.
+          Menu: "Keep Claude Switcher Up to Date" (the off-switch: off means no automatic network
+          request at all; config key updateSwitcherAutomatically), "Check for Claude Switcher
+          Updates\u{2026}", and "Update Claude Switcher to X & Relaunch" once a verified release is
+          waiting. A copy built from source, or not in /Applications or ~/Applications, never
+          replaces itself; it checks only when asked.
+
+        INTERNAL
+          --after-update <pid>        Given by Claude Switcher to the copy it starts after replacing
+                                      itself; not for use by hand.
+        """
+    }
+
     // MARK: Pure derivations (no I/O — safe to call from anywhere, including --dry-run)
 
     /// Delegates to ``LaunchPlanning`` (moved to Core so it is covered by tests).
@@ -21,13 +81,14 @@ public enum Diagnostics {
 
     /// The full `--dry-run` report. Pure: builds a string from values handed to it, so it
     /// can be printed with no UI, no directory creation and nothing launched.
-    public static func launchPlan(
+    static func launchPlan(
         config: Config,
         running: [RunningInstance],
         update: UpdateStatus? = nil,
-        usage: [String: UsageReading] = [:],
+        usage: UsageSnapshot? = nil,
         updateAttempts: [String: UpdateAttempt] = [:],
         updateBlocks: [String: UpdateBlock.State] = [:],
+        switcher: String? = nil,
         now: Date = Date()
     ) -> String {
         var lines: [String] = []
@@ -39,6 +100,8 @@ public enum Diagnostics {
         if let update, let summary = stagedUpdateSummary(update, runningCount: running.count) {
             lines.append("Update:       \(summary)")
         }
+        // Claude Switcher's own updates, from state.json: one line, nothing fetched.
+        if let switcher { lines.append(switcher) }
         lines.append("Shared dir:   \(sharedConfigDirectory.path) (shared by every account; CLAUDE_CONFIG_DIR is never set by this app)")
         lines.append("Active account: \(config.activeProfileId)")
         lines.append("")
@@ -74,13 +137,25 @@ public enum Diagnostics {
             }
             lines.append("  keychain item:   \(KeychainProbe.serviceName(forCredDir: profile.credDir))  (terminal CLI only; existence check only — the secret is never read)")
             lines.append("  terminal cmd:    \(terminalCommand(for: profile))")
-            lines.append("  usage:           \(UsageText.summary(usage[profile.id], time: clockTime))  (read from this account's plan-usage-history.json; never fetched)")
+            lines.append("  usage:           \(UsageText.summary(usage?.forecasts[profile.id]?.reading, time: clockTime))  (read from this account's plan-usage-history.json; never fetched)")
+            if let usage, let forecast = usage.forecasts[profile.id] {
+                let clock = UsageClock(now: now)
+                lines.append("  forecast:        \(DiagnosticsText.forecast(forecast, clock: clock, indexState: usage.indexState))")
+                lines.append("  schedule:        \(DiagnosticsText.schedule(forecast, clock: clock))")
+                lines.append("  calibration:     \(DiagnosticsText.calibration(forecast, costs: usage.costs))")
+            }
             if let attempt = updateAttempts[profile.id] {
                 lines.append("  closed itself:   \(closedForUpdateSummary(attempt))")
             }
             if let block = updateBlocks[profile.id] {
                 lines.append("  update block:    \(updateBlockSummary(block))")
             }
+            lines.append("")
+        }
+
+        // One advice block, from the index as it is on disk: --dry-run never reads a transcript.
+        if let usage, !config.profiles.isEmpty {
+            lines.append(contentsOf: DiagnosticsText.dryRunAdvice(usage, labels: UsageMenu.labels(config), clock: UsageClock(now: now)))
             lines.append("")
         }
 
@@ -197,8 +272,10 @@ public enum Diagnostics {
         public var cli: CLIProbe
         /// profile id -> terminal CLI sign-in (existence check only; false on any failure).
         public var signedIn: [String: Bool]
-        /// profile id -> the usage Claude Desktop last recorded, from the profile's own file.
-        public var usage: [String: UsageReading]
+        /// Every account's recorded usage, forecast and the Advisor's answers (``UsageQuery``).
+        var usage: UsageSnapshot
+        /// The switcher's activity index as of the app's last refresh; `nil` while it is built.
+        var activity: ActivityIndex.Refresh?
         /// profile id -> the marker of a profile that closed itself for an update. Read-only.
         public var updateAttempts: [String: UpdateAttempt]
         /// profile id -> whether our update-block policy is in place for it.
@@ -206,27 +283,23 @@ public enum Diagnostics {
         public var now: Date
     }
 
-    public static func probe(appPath: String, profiles: [ProfileQuery]) -> Probe {
+    static func probe(appPath: String, profiles: [ProfileQuery], usage: UsageQuery, activity: ActivityIndex.Refresh?) -> Probe {
         let now = Date()
         var signedIn: [String: Bool] = [:]
-        var usage: [String: UsageReading] = [:]
         var updateAttempts: [String: UpdateAttempt] = [:]
         var updateBlocks: [String: UpdateBlock.State] = [:]
         for query in profiles {
             updateAttempts[query.id] = UpdateAttemptMarker.read(userDataDir: query.userDataDir)
             updateBlocks[query.id] = UpdateBlock.state(userDataDir: query.userDataDir)
             signedIn[query.id] = KeychainProbe.isSignedIn(credDir: query.credDir)
-            if let samples = UsageHistory.read(userDataDir: query.userDataDir),
-               let reading = UsageReading.make(samples: samples, now: now) {
-                usage[query.id] = reading
-            }
         }
         return Probe(
             bundleIdentifier: InstanceManager.bundleIdentifier(appPath: appPath),
             update: UpdateProbe.status(appPath: appPath),
             cli: probeCLI(),
             signedIn: signedIn,
-            usage: usage,
+            usage: usage.read(now: now),
+            activity: activity,
             updateAttempts: updateAttempts,
             updateBlocks: updateBlocks,
             now: now
@@ -307,17 +380,36 @@ public enum Diagnostics {
         return lines
     }
 
+    /// The Advisor's three answers, the activity index and the assumptions they rest on, after
+    /// the accounts. Counts and labels only. Empty with no accounts.
+    static func advisorSection(config: Config, probe: Probe) -> [String] {
+        var lines = DiagnosticsText.advisorSection(probe.usage, labels: UsageMenu.labels(config), summary: probe.activity?.summary,
+                                                   clock: UsageClock(now: probe.now))
+        guard !lines.isEmpty else { return [] }
+        if let error = probe.activity?.writeError {
+            lines.append("  activity index could not be written (\(error)); what was read is kept in memory until the app quits")
+        }
+        lines.append("")
+        return lines
+    }
+
     /// The report's GUARANTEES, one per line — what a user pastes into a bug report, so each
-    /// must stay true of what the app does (README §2.12, Appendix B rules 14, 16, 18 and 19).
+    /// must stay true of what the app does (README §2.12, Appendix B rules 13, 14, 16, 18 and 19).
     static let guarantees: [String] = [
         "Keychain secrets are never read, written or deleted \u{2014} existence only.",
         "CLAUDE_CODE_OAUTH_TOKEN and CLAUDE_CONFIG_DIR are never set.",
         "No CLAUDE_* variable is ever passed to Claude.app; the account comes from --user-data-dir.",
         "The Claude.app bundle is never modified, copied or duplicated.",
         "Claude is only ever asked to quit by \u{201C}Quit All & Install Update\u{2026}\u{201D}, after you confirm \u{2014} never forced.",
-        "Usage is read from each account's own plan-usage-history.json \u{2014} never written, never fetched, no token or cookie read.",
+        DiagnosticsText.guarantee,
         "Anything this app does to Claude's processes on its own initiative only ever starts Claude for an account; it never quits one.",
-        "The one other automatic step is finishing or cleaning up its own session copy that did not finish.",
+        "The other automatic steps are finishing or cleaning up its own session copy, and \u{2014} unless Keep Claude Switcher "
+            + "Up to Date is off \u{2014} replacing Claude Switcher itself with a newer release signed by the same developer "
+            + "team and notarized by Apple; Claude is never quit, started or changed to do so.",
+        "The only network requests are to GitHub for Claude Switcher's own releases, with no token, cookie or account data; "
+            + "macOS may also ask Apple's servers while it checks a signature or notarization.",
+        "Claude Switcher only ever deletes a new version of itself that it downloaded and never put in place; a copy that "
+            + "was in use is moved to its own folder or the Trash, never deleted.",
         "The only files ever created in Claude's data are the two update-block policy files (on your toggle) and a session copy's "
             + "files (its transcript and subagent transcripts in ~/.claude/projects and one record in the other account's store), "
             + "made only when you confirm a copy; nothing Claude made is ever replaced or removed, and a policy this tool did not "
@@ -326,7 +418,7 @@ public enum Diagnostics {
     ]
 
     static func report(config: Config, running: [RunningInstance], probe: Probe, sessions: SessionMenuData? = nil,
-                       recoveryNotes: [SessionCopy.RecoveryNote] = []) -> String {
+                       recoveryNotes: [SessionCopy.RecoveryNote] = [], switcher: SwitcherFacts? = nil) -> String {
         var lines: [String] = []
         let fileManager = FileManager.default
 
@@ -340,6 +432,8 @@ public enum Diagnostics {
         lines.append("  active account:  \(config.activeProfileId)")
         lines.append("  accounts:        \(config.profiles.count)")
         lines.append("")
+
+        if let switcher { lines.append(contentsOf: switcherSection(switcher)) }
 
         lines.append("CLAUDE DESKTOP")
         let appExists = fileManager.fileExists(atPath: PathNormalizer.normalize(config.claudeAppPath))
@@ -404,7 +498,11 @@ public enum Diagnostics {
             lines.append("    desktop app:    \(instance.map { "running (pid \($0.pid))" } ?? "not running")")
             lines.append("    argv:           \(launchArguments(for: profile).map { "\"\($0)\"" }.joined(separator: " "))")
             lines.append("    terminal cmd:   \(terminalCommand(for: profile))")
-            lines.append("    usage:          \(UsageText.summary(probe.usage[profile.id], time: clockTime))")
+            lines.append("    usage:          \(UsageText.summary(probe.usage.forecasts[profile.id]?.reading, time: clockTime))")
+            if let forecast = probe.usage.forecasts[profile.id] {
+                lines.append(contentsOf: DiagnosticsText.accountLines(forecast, costs: probe.usage.costs, clock: UsageClock(now: probe.now),
+                                                                      indexState: probe.usage.indexState))
+            }
             if let attempt = probe.updateAttempts[profile.id] {
                 lines.append("    closed itself:  \(closedForUpdateSummary(attempt))")
             }
@@ -417,6 +515,7 @@ public enum Diagnostics {
             lines.append("")
         }
         lines.append(contentsOf: sessionCopiesSection(sessions: sessions, recoveryNotes: recoveryNotes))
+        lines.append(contentsOf: advisorSection(config: config, probe: probe))
 
         let strays = ProfileMatching.unmatched(running, profiles: config.profiles)
         if !strays.isEmpty {
@@ -431,6 +530,186 @@ public enum Diagnostics {
         lines.append(contentsOf: guarantees.map { "  " + $0 })
 
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: Claude Switcher itself
+
+    /// What Diagnostics knows about Claude Switcher updating itself, gathered on the main actor.
+    struct SwitcherFacts {
+        var running: RunningCopy
+        /// `nil` until a check has asked.
+        var notarization: NotarizationVerdict?
+        /// Why this copy never replaces itself, whatever is still to be learnt; `nil` while it might.
+        var neverReplacesItself: ChecksOnlyReason?
+        var settingOn: Bool
+        var isLockHolder: Bool
+        var state: SwitcherUpdateState
+        /// The verified release this process keeps for a commit, and the folder it is staged in.
+        var ready: ReleaseVersion?
+        var readyFolder: String?
+        /// What holds that commit back right now, if anything does.
+        var waitingFor: String?
+        /// In place, starting at the next launch.
+        var restartPending: ReleaseVersion?
+        /// What the launch-time pass found, for this run.
+        var launchFindings: [String]
+        var launchAtLogin: LoginItemState
+        /// Launch at Login was on before the update and is not now.
+        var launchAtLoginNeedsTurningOn: Bool
+        var now: Date
+    }
+
+    static let switcherNetworkLine = "GET api.github.com/repos/kevinchau/claude-switcher/releases/latest and that "
+        + "release's Claude.Switcher.dmg (github.com \u{2192} release-assets.githubusercontent.com); no token, no cookie; "
+        + "nothing when the toggle is off"
+
+    /// The CLAUDE SWITCHER section: what this copy is, whether and why it replaces itself, what
+    /// the last check and the last update came to, and what it left behind.
+    static func switcherSection(_ facts: SwitcherFacts) -> [String] {
+        func line(_ label: String, _ value: String) -> String {
+            "  " + (label + ":").padding(toLength: 17, withPad: " ", startingAt: 0) + value
+        }
+        let identity = facts.running.identity
+        let state = facts.state
+        let version = identity.version
+        var lines = ["CLAUDE SWITCHER"]
+
+        lines.append(line("version", "\(version?.description ?? "(unreadable)")  (\(facts.running.bundlePath))"))
+
+        var signed: [String] = []
+        if identity.isAdHoc {
+            signed.append("ad-hoc signature")
+        } else if let team = identity.teamID {
+            signed.append("Developer ID, team \(team) (read from this copy)")
+        } else {
+            signed.append("no Developer ID team")
+        }
+        signed.append(identity.hasHardenedRuntime ? "hardened runtime" : "no hardened runtime")
+        switch facts.notarization {
+        case .accepted?: signed.append("notarized: accepted")
+        case .rejected?: signed.append("notarized: rejected")
+        case .unknown?, nil: signed.append("notarized: not confirmed yet")
+        }
+        lines.append(line("signed by", signed.joined(separator: ", ")))
+
+        let automatic: Bool
+        if let reason = facts.neverReplacesItself {
+            lines.append(line("updates itself", "no \u{2014} \(reason.message)"))
+            automatic = false
+        } else if !facts.isLockHolder {
+            lines.append(line("updates itself", "no \u{2014} another Claude Switcher holds the lock"))
+            automatic = false
+        } else if !facts.settingOn {
+            lines.append(line("updates itself", "no \u{2014} off; checks only when you ask"))
+            automatic = false
+        } else if case .unknown? = facts.notarization {
+            lines.append(line("updates itself", "not yet \u{2014} \(ChecksOnlyReason.notarizationUnconfirmed.message)"))
+            automatic = true
+        } else if facts.notarization == nil {
+            // Not asked yet: the first check does, and nothing is replaced before it has.
+            lines.append(line("updates itself", "yes, automatically (once notarization is confirmed)"))
+            automatic = true
+        } else {
+            lines.append(line("updates itself", "yes, automatically"))
+            automatic = true
+        }
+
+        if let at = state.lastCheckAt {
+            let summary = SwitcherUpdateUI.checkSummary(state, running: version, verified: facts.ready, time: clockTime)
+            lines.append(line("last check", "\(clockTime(at)) \u{2014} \(summary ?? "no result")"))
+        } else {
+            lines.append(line("last check", "never"))
+        }
+        if facts.restartPending != nil {
+            lines.append(line("next check", "none \u{2014} the new version starts at the next launch"))
+        } else if !automatic {
+            lines.append(line("next check", "only when you choose Check for Claude Switcher Updates\u{2026}"))
+        } else if let next = state.nextCheckNotBefore, next > facts.now {
+            lines.append(line("next check", "after \(clockTime(next))"))
+        } else {
+            lines.append(line("next check", "due now (looked at every 30 minutes)"))
+        }
+
+        if let pending = facts.restartPending {
+            lines.append(line("waiting", "\(pending) is in place; starts at the next launch"))
+        } else if let ready = facts.ready {
+            let now = facts.waitingFor.map { " (now: \($0))" } ?? ""
+            lines.append(line("waiting", "\(ready) downloaded and verified; relaunches when nothing is going on\(now)"))
+        } else {
+            lines.append(line("waiting", "\u{2014}"))
+        }
+
+        if let install = state.lastInstall {
+            var text = install.kind == .revert
+                ? "went back from \(install.from) to \(install.to) at \(clockTime(install.at))"
+                : "\(install.from) \u{2192} \(install.to) at \(clockTime(install.at))"
+            switch install.oldCopy?.kind {
+            case .previous?: text += "; previous copy: \(install.oldCopy!.path)"
+            case .trash?: text += "; previous copy: in the Trash (\(install.oldCopy!.path))"
+            case .staging?: text += "; previous copy: left at \(install.oldCopy!.path)"
+            case nil: break
+            }
+            lines.append(line("last update", text))
+        } else {
+            lines.append(line("last update", "\u{2014}"))
+        }
+
+        var failure: [String] = []
+        if let last = state.lastFailure {
+            var text = "\(last.tag ?? "the update") at \(clockTime(last.at)) \u{2014} \(last.step): \(last.reason)"
+            // A rejection is of one release file: a new digest under the same tag is tried again.
+            if let tag = last.tag, let digest = last.digest, state.isRejected(tag: tag, digest: digest) {
+                text += "; not tried again automatically"
+            } else if let tag = last.tag, let digest = last.digest, let attempt = state.attempts?[tag + "#" + digest] {
+                text += "; tried again after \(clockTime(attempt.nextNotBefore))"
+            }
+            failure.append(text)
+        }
+        if state.downloadsPaused == true {
+            failure.append("downloads paused after \(SwitcherUpdatePolicy.pauseAfterRejections) rejected releases "
+                + "(a check you ask for starts them again)")
+        }
+        lines.append(line("last failure", failure.isEmpty ? "\u{2014}" : failure.joined(separator: "; ")))
+
+        if let latest = state.candidate {
+            let immutable = latest.immutable.map { $0 ? "yes" : "no" } ?? "not stated"
+            lines.append(line("release flags", "latest \(latest.tag), immutable: \(immutable)"))
+        } else {
+            lines.append(line("release flags", "\u{2014}"))
+        }
+        lines.append(line("disk image", state.mounted.map { "may still be mounted: \($0) (detached at the next check or launch)" }
+            ?? "none mounted"))
+        let staging = (state.staging ?? []).map { folder in
+            folder == facts.readyFolder
+                ? "holds the verified \(facts.ready.map(\.description) ?? "release"): \(folder)"
+                : "a folder is left at \(folder)"
+        }
+        for (index, text) in (staging.isEmpty ? ["clean"] : staging).enumerated() {
+            lines.append(index == 0 ? line("staging", text) : String(repeating: " ", count: 19) + text)
+        }
+        lines.append(line("relaunch", state.relaunchFindings?.last ?? "\u{2014}"))
+
+        let login: String
+        if facts.launchAtLoginNeedsTurningOn {
+            login = "needs to be turned on again"
+        } else {
+            switch facts.launchAtLogin {
+            case .enabled: login = "enabled"
+            case .disabled: login = "off"
+            case .requiresApproval: login = "waiting for approval in System Settings"
+            case .unavailable: login = "unavailable (not an installed app bundle)"
+            }
+        }
+        lines.append(line("launch at login", login))
+
+        let foreign = state.foreignRecordsSeen == true || facts.launchFindings.contains(SwitcherUpdater.foreignFinding)
+        lines.append(line("other Macs", foreign ? SwitcherUpdater.foreignFinding : "\u{2014}"))
+        for (index, finding) in facts.launchFindings.filter({ $0 != SwitcherUpdater.foreignFinding }).enumerated() {
+            lines.append(index == 0 ? line("at launch", finding) : String(repeating: " ", count: 19) + finding)
+        }
+        lines.append(line("network", switcherNetworkLine))
+        lines.append("")
+        return lines
     }
 
     // MARK: - Subprocess helpers

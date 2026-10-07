@@ -17,39 +17,6 @@ import ClaudeSwitcherCore
 //   * CLAUDE_SECURESTORAGE_CONFIG_DIR is for the TERMINAL claude CLI only. It selects a
 //     separate credential slot while still sharing ~/.claude, and is never passed to the app.
 
-private let usageText = """
-claude-switcher — switch between Claude Desktop accounts from the menu bar.
-
-USAGE
-  claude-switcher             Run the menu bar app (no Dock icon; a welcome window the first time).
-  claude-switcher --dry-run   Print the resolved launch plan for every account, then exit.
-                              Launches nothing, creates no directories, touches no state.
-  claude-switcher --help      Show this message.
-
-CONFIG
-  \(Config.configURL.path)
-
-HOW ACCOUNTS DIFFER
-  Desktop app   a separate Electron user-data dir (--user-data-dir) — its own login for
-                both chat and the Code tab. Instances run side by side.
-  Terminal CLI  a separate CLAUDE_SECURESTORAGE_CONFIG_DIR credential slot, applied by
-                you in your shell via "Copy terminal command".
-
-WHAT STAYS SHARED
-  ~/.claude — projects, session history, skills, agents, plugins, memory, settings and
-  CLAUDE.md — is shared by every account. claude-switcher never sets CLAUDE_CONFIG_DIR,
-  never sets CLAUDE_CODE_OAUTH_TOKEN, and never reads or writes Keychain secrets (it only
-  checks whether a credential item exists). Usage shown per account is read from that
-  account's own plan-usage-history.json, which Claude Desktop writes; it is never fetched.
-
-WHAT DOES NOT
-  Conversations. Chats live with each account on claude.ai, and Claude Desktop keeps the
-  Code tab's session list per account inside each user-data dir. The transcripts are in
-  ~/.claude, but an account's list only shows the sessions that account started.
-  The menu's Sessions submenu can copy one Code session to another account: an independent
-  copy, which that account's Claude lists the next time it starts.
-"""
-
 /// Prints the launch plan without touching anything. Returns the process exit code.
 private func runDryRun() -> Int32 {
     let config: Config
@@ -67,32 +34,57 @@ private func runDryRun() -> Int32 {
     let running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
     let update = UpdateProbe.status(appPath: config.claudeAppPath)
     let now = Date()
-    var usage: [String: UsageReading] = [:]
     var updateAttempts: [String: UpdateAttempt] = [:]
     var updateBlocks: [String: UpdateBlock.State] = [:]
     for profile in config.profiles {
         updateAttempts[profile.id] = UpdateAttemptMarker.read(userDataDir: profile.userDataDir)
         updateBlocks[profile.id] = UpdateBlock.state(userDataDir: profile.userDataDir)
-        if let samples = UsageHistory.read(userDataDir: profile.userDataDir),
-           let reading = UsageReading.make(samples: samples, now: now) {
-            usage[profile.id] = reading
-        }
     }
+    // Usage and advice from the activity index as it is on disk: never a transcript scan, never
+    // a write. No index (it is built when the app runs) means recorded values and no advice; one
+    // more than an hour old is not advised from either.
+    let stored = ActivityIndex.stored(profiles: config.profiles, home: NSHomeDirectory(), indexURL: ActivityIndex.defaultURL, now: now)
+    let usage = UsageQuery(
+        profiles: config.profiles, activity: stored?.ledgers,
+        indexState: stored.map { .ready(indexedThrough: $0.file.updatedAt) } ?? .building,
+        running: Set(config.profiles.filter { ProfileMatching.isRunning($0, in: running) }.map(\.id))
+    ).read(now: now)
     print(Diagnostics.launchPlan(config: config, running: running, update: update, usage: usage,
-                                 updateAttempts: updateAttempts, updateBlocks: updateBlocks, now: now))
+                                 updateAttempts: updateAttempts, updateBlocks: updateBlocks,
+                                 switcher: switcherDryRunLine(config: config, now: now), now: now))
     return 0
+}
+
+/// What this copy would do about updating itself, from state.json: read, never fetched. The
+/// copy's own signature is checked in-process, as the app does at its first check, but off the
+/// network: a stapled release still reads as notarized, while a copy whose ticket is neither
+/// stapled nor cached by macOS fails the offline check (-67050) and reads as not notarized.
+private func switcherDryRunLine(config: Config, now: Date) -> String {
+    let copy = RunningCopy.current()
+    // A copy with no trust anchor stops at an earlier reason before notarization is looked at.
+    let notarization = SwitcherTrust(copy).map {
+        CodeSignature.runningNotarization(trust: $0, flags: CodeSignature.offlineFlags)
+    } ?? .rejected
+    let installability = SwitcherUpdatePolicy.installability(of: copy, notarization: notarization)
+    return SwitcherUpdateUI.dryRunLine(version: copy.identity.version, installability: installability,
+                                       settingOn: config.updateSwitcherAutomatically,
+                                       state: SwitcherUpdateStore().snapshot(now: now), time: Diagnostics.clockTime)
 }
 
 let commandLineArguments = CommandLine.arguments.dropFirst()
 
 if commandLineArguments.contains("--help") || commandLineArguments.contains("-h") {
-    print(usageText)
+    print(Diagnostics.usageText)
     exit(0)
 }
 
 if commandLineArguments.contains("--dry-run") {
     exit(runDryRun())
 }
+
+// Started by an older copy that has just replaced itself with this one. Nothing waits here:
+// AppKit starts as always, and the automation lock settles which copy carries on.
+let launchedAfterUpdate = SwitcherRelaunch.afterUpdatePID(in: Array(commandLineArguments))
 
 // AppDelegate is @MainActor-isolated. Top-level code in main.swift is a synchronous
 // *nonisolated* context, so constructing it directly is a compile error. The process is
@@ -101,7 +93,7 @@ if commandLineArguments.contains("--dry-run") {
 MainActor.assumeIsolated {
     let application = NSApplication.shared
     application.setActivationPolicy(.accessory)   // menu bar only: no Dock tile
-    let appDelegate = AppDelegate()
+    let appDelegate = AppDelegate(launchedAfterUpdate: launchedAfterUpdate)
     application.delegate = appDelegate
     application.run()
 }

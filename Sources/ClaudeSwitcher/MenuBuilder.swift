@@ -24,7 +24,40 @@ enum MenuBuilder {
         var toggleBlockUpdates: Selector
         var installUpdate: Selector
         var copySession: Selector
+        var toggleUpdateSwitcherAutomatically: Selector
+        var checkForSwitcherUpdates: Selector
+        var installSwitcherUpdate: Selector
         var quit: Selector
+    }
+
+    /// One line of text, with what its tooltip says.
+    struct MenuLine: Equatable {
+        var text: String
+        var toolTip: String?
+    }
+
+    /// Claude Switcher updating itself, as the menu shows it.
+    struct SwitcherMenu {
+        /// The setting, "Keep Claude Switcher Up to Date".
+        var automatic = true
+        /// Set for a copy that never replaces itself: the toggle is off and disabled.
+        var checksOnlyReason: String?
+        /// The toggle's last sentence: "Last checked 3:12 PM: up to date."
+        var lastCheck = "Not checked yet."
+        /// Checking, downloading, or replacing itself.
+        var progress: String?
+        /// From the decision to the relaunch: Quit and the settings wait for it.
+        var isCommitting = false
+        /// A check or its download is running.
+        var isChecking = false
+        /// A verified release this copy keeps: "Update Claude Switcher to X & Relaunch".
+        var ready: ReleaseVersion?
+        /// Ready and waiting for nothing to be going on, or in place for the next launch.
+        var waiting: MenuLine?
+        /// Shown once: it updated itself, could not, or went back.
+        var notice: SwitcherNotice?
+        /// The new version is in place and starts at the next launch: nothing more to check.
+        var restartPending = false
     }
 
     struct Input {
@@ -42,10 +75,14 @@ enum MenuBuilder {
         var blockedUpdate: StagedUpdate?
         /// Set for the duration of "Quit All & Install Update…"; replaces the offer with progress.
         var updateProgress: String?
-        /// profile id -> the usage Claude Desktop last recorded for it (read before the build).
-        var usage: [String: UsageReading] = [:]
+        /// Every account's recorded usage, its forecast and the Advisor's answers, as last read
+        /// off the main thread (``UsageQuery/read(home:now:)``). `nil`: not read yet.
+        var usage: UsageSnapshot?
         /// The moment the menu is built; readings are judged against it.
         var now: Date = Date()
+        /// How usage times are written: the Mac's own zone and language (fixed in tests).
+        var timeZone: TimeZone = .current
+        var locale: Locale = .current
         /// Set after profiles were reopened automatically; shown once so it is never silent.
         var autoReopenNotice: String?
         /// No claude CLI was found at launch; the copied commands cannot run without one.
@@ -57,6 +94,7 @@ enum MenuBuilder {
         /// What a recovery pass at launch did about copies that had not finished: one short line,
         /// the notes in its tooltip. Shown once so it is never silent; Diagnostics keeps them.
         var copyNotes: [SessionCopy.RecoveryNote] = []
+        var switcher = SwitcherMenu()
     }
 
     // MARK: - Build
@@ -66,6 +104,10 @@ enum MenuBuilder {
         menu.autoenablesItems = false
 
         menu.addItem(informationalItem(runningSummary(input)))
+        // Which account to start a session in: above the accounts, under the running line.
+        if let advisor = UsageMenu.advisorItem(input, target: target, actions: actions) {
+            menu.addItem(advisor)
+        }
 
         if let error = input.configError {
             menu.addItem(informationalItem("Config problem: \(error)"))
@@ -77,6 +119,11 @@ enum MenuBuilder {
         }
         if let notice = input.autoReopenNotice {
             menu.addItem(informationalItem(notice))
+        }
+        if let notice = input.switcher.notice {
+            let item = informationalItem(notice.text)
+            item.toolTip = notice.tooltip
+            menu.addItem(item)
         }
         if !input.copyNotes.isEmpty {
             let item = informationalItem(SessionMenu.recoverySummary(input.copyNotes))
@@ -93,6 +140,9 @@ enum MenuBuilder {
         }
         if let progress = input.updateProgress {
             menu.addItem(informationalItem(progress))
+        } else if input.switcher.isCommitting, let progress = input.switcher.progress {
+            // Replacing itself holds the launch slot; say what is happening, not "Starting Claude…".
+            menu.addItem(informationalItem(progress))
         } else if input.isBusy {
             menu.addItem(informationalItem("Starting Claude\u{2026}"))
         } else if let update = input.blockedUpdate, !input.running.isEmpty {
@@ -104,6 +154,15 @@ enum MenuBuilder {
             installItem.target = target
             installItem.toolTip = "Asks Claude to quit on every account, waits for Claude\u{2019}s own installer to finish, then reopens the accounts that were running. Nothing happens until you confirm."
             menu.addItem(installItem)
+        }
+        // A check or a download runs beside whatever Claude is doing, so it never hides that.
+        if !input.switcher.isCommitting, let progress = input.switcher.progress {
+            menu.addItem(informationalItem(progress))
+        }
+        if let waiting = input.switcher.waiting {
+            let item = informationalItem(waiting.text)
+            item.toolTip = waiting.toolTip
+            menu.addItem(item)
         }
 
         menu.addItem(.separator())
@@ -120,10 +179,9 @@ enum MenuBuilder {
             item.state = ProfileMatching.isRunning(profile, in: input.running) ? .on : .off
             item.isEnabled = !input.isBusy && input.claudeAppExists
             item.toolTip = profileToolTip(profile, input: input)
+            item.identifier = accountItemIdentifier(profile.id)
             menu.addItem(item)
-            if let reading = input.usage[profile.id], !reading.rows.isEmpty {
-                menu.addItem(usageItem(for: profile, reading: reading, now: input.now))
-            }
+            for usageItem in UsageMenu.accountItems(for: profile, input: input) { menu.addItem(usageItem) }
             menu.addItem(SessionMenu.item(for: profile, input: input, target: target, action: actions.copySession))
         }
 
@@ -235,8 +293,12 @@ enum MenuBuilder {
         diagnosticsItem.target = target
         menu.addItem(diagnosticsItem)
 
+        // While Claude Switcher replaces itself, its settings wait: the copy that starts reads them.
+        let settingsEnabled = !input.switcher.isCommitting
+
         let loginItem = NSMenuItem(title: "Launch at Login", action: actions.toggleLaunchAtLogin, keyEquivalent: "")
         loginItem.target = target
+        loginItem.isEnabled = settingsEnabled
         switch input.launchAtLogin {
         case .enabled:
             loginItem.state = .on
@@ -255,29 +317,76 @@ enum MenuBuilder {
         let reopenItem = NSMenuItem(title: "Reopen Accounts After Claude Updates", action: actions.toggleReopenAfterUpdate, keyEquivalent: "")
         reopenItem.target = target
         reopenItem.state = input.config.reopenAfterUpdate ? .on : .off
+        reopenItem.isEnabled = settingsEnabled
         reopenItem.toolTip = "When Claude updates itself it closes, and its installer only reopens the default account. With this on, the other accounts that closed for the update are started again, in the background, once the update is in. It only ever starts Claude \u{2014} nothing is quit."
         menu.addItem(reopenItem)
 
         let blockItem = NSMenuItem(title: "Block Claude Auto-Updates", action: actions.toggleBlockUpdates, keyEquivalent: "")
         blockItem.target = target
         blockItem.state = input.config.blockClaudeUpdates ? .on : .off
+        blockItem.isEnabled = settingsEnabled
         blockItem.toolTip = input.config.blockClaudeUpdates
             ? "Claude will not update itself. No security or compatibility fixes arrive, and the Code tab\u{2019}s CLI stops updating too. Applies the next time each account starts. To update: turn this off and restart an account."
             : "Stops Claude Desktop from downloading or installing updates, so it never closes itself to update. Asks first, and tells you what you give up."
         menu.addItem(blockItem)
 
+        // MARK: Claude Switcher itself
+        menu.addItem(.separator())
+        for item in switcherItems(input.switcher, target: target, actions: actions) { menu.addItem(item) }
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Quit Claude Switcher", action: actions.quit, keyEquivalent: "q")
         quitItem.target = target
-        // Quitting mid-update would leave every profile closed with nothing to reopen them.
-        quitItem.isEnabled = input.updateProgress == nil
+        // Quitting mid-update would leave every profile closed with nothing to reopen them; and
+        // while Claude Switcher replaces itself, the commit ends this process itself.
+        quitItem.isEnabled = input.updateProgress == nil && !input.switcher.isCommitting
         menu.addItem(quitItem)
 
         return menu
     }
 
-    // MARK: - Usage
+    // MARK: - Claude Switcher itself
+
+    /// "Keep Claude Switcher Up to Date", "Check for Claude Switcher Updates…", and — only while a
+    /// verified release is kept — "Update Claude Switcher to X & Relaunch".
+    static func switcherItems(_ switcher: SwitcherMenu, target: AnyObject, actions: Actions) -> [NSMenuItem] {
+        var items: [NSMenuItem] = []
+
+        let keepItem = NSMenuItem(title: SwitcherUpdateUI.keepUpToDateTitle,
+                                  action: actions.toggleUpdateSwitcherAutomatically, keyEquivalent: "")
+        keepItem.target = target
+        if let reason = switcher.checksOnlyReason {
+            keepItem.state = .off
+            keepItem.isEnabled = false
+            keepItem.toolTip = SwitcherUpdateUI.checksOnlyToolTip(reason)
+        } else {
+            keepItem.state = switcher.automatic ? .on : .off
+            keepItem.isEnabled = !switcher.isCommitting
+            keepItem.toolTip = switcher.automatic
+                ? SwitcherUpdateUI.onToolTip(lastCheck: switcher.lastCheck) : SwitcherUpdateUI.offToolTip
+        }
+        items.append(keepItem)
+
+        let checkItem = NSMenuItem(title: SwitcherUpdateUI.checkTitle, action: actions.checkForSwitcherUpdates,
+                                   keyEquivalent: "")
+        checkItem.target = target
+        checkItem.isEnabled = !switcher.isChecking && !switcher.isCommitting && !switcher.restartPending
+        checkItem.toolTip = SwitcherUpdateUI.checkToolTip
+        items.append(checkItem)
+
+        if let version = switcher.ready {
+            let updateItem = NSMenuItem(title: SwitcherUpdateUI.updateTitle(version),
+                                        action: actions.installSwitcherUpdate, keyEquivalent: "")
+            updateItem.target = target
+            updateItem.isEnabled = !switcher.isCommitting
+            updateItem.toolTip = SwitcherUpdateUI.updateToolTip(version)
+            items.append(updateItem)
+        }
+        return items
+    }
+
+    // MARK: - Times
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -300,32 +409,9 @@ enum MenuBuilder {
             : dayTimeFormatter.string(from: date)
     }
 
-    static func usageItemIdentifier(_ profileID: String) -> NSUserInterfaceItemIdentifier {
-        NSUserInterfaceItemIdentifier("claude-switcher.usage.\(profileID)")
-    }
-
-    /// The drawn usage rows under a profile. A view item never draws its title, so the title
-    /// carries the sentence VoiceOver reads; the view itself is not an accessibility element.
-    static func usageItem(for profile: Profile, reading: UsageReading, now: Date) -> NSMenuItem {
-        let time: (Date) -> String = { clock($0, now: now) }
-        let rows = reading.rows.map { row in
-            UsageBarView.Row(
-                label: row.label,
-                percent: row.percent,
-                level: UsageLevel.of(row.percent ?? 0),
-                trailing: UsageText.trailing(for: row, in: reading, time: time)
-            )
-        }
-        let view = UsageBarView(rows: rows)
-        view.toolTip = UsageText.tooltip(reading, time: time)
-        view.setAccessibilityElement(false)
-
-        let item = NSMenuItem(title: UsageText.accessibilityText(reading, profileLabel: profile.label, time: time),
-                              action: nil, keyEquivalent: "")
-        item.view = view
-        item.isEnabled = false
-        item.identifier = usageItemIdentifier(profile.id)
-        return item
+    /// An account's own row: where its usage items go when a newer snapshot patches them in.
+    static func accountItemIdentifier(_ profileID: String) -> NSUserInterfaceItemIdentifier {
+        NSUserInterfaceItemIdentifier("claude-switcher.account.\(profileID)")
     }
 
     // MARK: - Hints

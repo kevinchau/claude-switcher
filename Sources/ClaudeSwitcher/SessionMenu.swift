@@ -163,7 +163,8 @@ enum SessionMenu {
             row.badge = NSMenuItemBadge(string: session.isRunning ? "open" : age(session.record.lastActivityAt, now: input.now))
             row.toolTip = toolTip(session, title: title, now: input.now)
             row.submenu = actionsMenu(for: session, title: title, source: profile, others: others,
-                                      data: data, isCopying: input.copyProgress != nil, target: target, action: action)
+                                      data: data, isCopying: input.copyProgress != nil || input.switcher.isCommitting,
+                                      target: target, action: action)
             menu.addItem(row)
         }
 

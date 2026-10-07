@@ -61,7 +61,7 @@ final class ConfigRoundTripTests: XCTestCase {
             try JSONSerialization.jsonObject(with: data) as? [String: Any])
 
         XCTAssertEqual(Set(object.keys), ["claudeAppPath", "activeProfileId", "profiles",
-                                          "reopenAfterUpdate", "blockClaudeUpdates"])
+                                          "reopenAfterUpdate", "blockClaudeUpdates", "updateSwitcherAutomatically"])
 
         let profiles = try XCTUnwrap(object["profiles"] as? [[String: Any]])
         let work = try XCTUnwrap(profiles.first { $0["id"] as? String == "work" })
@@ -174,21 +174,30 @@ final class ConfigRoundTripTests: XCTestCase {
 
     // MARK: - Settings added after 0.1
 
-    /// A file written by an older version has neither key. It must still load, with reopening
-    /// on (launch-only, so safe to default on) and the update block off (it changes Claude).
+    /// A file written by an older version has none of these keys. It must still load, with
+    /// reopening on (launch-only, so safe to default on), the update block off (it changes
+    /// Claude) and the switcher keeping itself up to date (it changes only itself).
     func testJSONMissingTheNewSettingsDecodesWithDefaults() throws {
         let json = #"{"claudeAppPath":"/Applications/Claude.app","activeProfileId":"default","profiles":[{"id":"default","label":"Personal"}]}"#
         let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
         XCTAssertTrue(config.reopenAfterUpdate)
         XCTAssertFalse(config.blockClaudeUpdates)
+        XCTAssertTrue(config.updateSwitcherAutomatically)
     }
 
     func testTheNewSettingsRoundTrip() throws {
         var config = makeConfig()
         config.reopenAfterUpdate = false
         config.blockClaudeUpdates = true
+        config.updateSwitcherAutomatically = false
         let decoded = try JSONDecoder().decode(Config.self, from: JSONEncoder().encode(config))
         XCTAssertEqual(decoded, config)
+        XCTAssertFalse(decoded.updateSwitcherAutomatically)
+    }
+
+    func testTheSwitcherUpdatesItselfByDefault() {
+        XCTAssertTrue(makeConfig().updateSwitcherAutomatically)
+        XCTAssertTrue(Config.defaultConfig().updateSwitcherAutomatically)
     }
 
     /// Claude keeps a profile's policy files in `<its directory>-3p`; `Claude-3p` belongs to

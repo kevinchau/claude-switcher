@@ -144,22 +144,29 @@ public struct Config: Codable, Equatable, Sendable {
     /// Keep Claude Desktop from updating itself, through its own `disableAutoUpdates` policy.
     public var blockClaudeUpdates: Bool
 
+    /// Claude Switcher checks GitHub for a newer release of itself and replaces itself when
+    /// nothing is going on. Only Claude Switcher: Claude is never quit, started or updated by it.
+    /// Off means no automatic network request at all.
+    public var updateSwitcherAutomatically: Bool
+
     public init(
         claudeAppPath: String,
         activeProfileId: String,
         profiles: [Profile],
         reopenAfterUpdate: Bool = true,
-        blockClaudeUpdates: Bool = false
+        blockClaudeUpdates: Bool = false,
+        updateSwitcherAutomatically: Bool = true
     ) {
         self.claudeAppPath = claudeAppPath
         self.activeProfileId = activeProfileId
         self.profiles = profiles
         self.reopenAfterUpdate = reopenAfterUpdate
         self.blockClaudeUpdates = blockClaudeUpdates
+        self.updateSwitcherAutomatically = updateSwitcherAutomatically
     }
 
     private enum CodingKeys: String, CodingKey {
-        case claudeAppPath, activeProfileId, profiles, reopenAfterUpdate, blockClaudeUpdates
+        case claudeAppPath, activeProfileId, profiles, reopenAfterUpdate, blockClaudeUpdates, updateSwitcherAutomatically
     }
 
     public init(from decoder: Decoder) throws {
@@ -170,6 +177,7 @@ public struct Config: Codable, Equatable, Sendable {
         // Settings added after 0.1: a file written by an older version simply lacks them.
         self.reopenAfterUpdate = try container.decodeIfPresent(Bool.self, forKey: .reopenAfterUpdate) ?? true
         self.blockClaudeUpdates = try container.decodeIfPresent(Bool.self, forKey: .blockClaudeUpdates) ?? false
+        self.updateSwitcherAutomatically = try container.decodeIfPresent(Bool.self, forKey: .updateSwitcherAutomatically) ?? true
 
         // Ids are the primary key for every lookup and mutation, so reject a
         // file that would make `profile(id:)` ambiguous. Directory collisions

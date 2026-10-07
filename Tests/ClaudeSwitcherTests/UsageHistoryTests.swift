@@ -9,8 +9,10 @@ final class UsageHistoryTests: XCTestCase {
 
     private var directory: URL!
 
-    /// A fixed moment; series are expressed as minute offsets from it.
-    private let base = Date(timeIntervalSince1970: 1_789_600_000)
+    /// A fixed moment on a ten-minute mark; series are expressed as minute offsets from it.
+    /// (It was 400 s past a mark before the window's ten-minute floor (A3) existed; it moved so
+    /// that the expectations below show the floor only where a sample is off a mark.)
+    private let base = Date(timeIntervalSince1970: 1_789_599_600)
 
     override func setUpWithError() throws {
         directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -152,19 +154,20 @@ final class UsageHistoryTests: XCTestCase {
     }
 
     /// The real Christy series: 15:58 fh 40, then 16:13 fh 2 … 20:47 fh 22 — the drop ends
-    /// the previous window, so this one ends after 15:58 + 5 h and by 16:13 + 5 h.
+    /// the previous window, so this one ends after 15:58 + 5 h and by 16:10 + 5 h (the 16:13
+    /// sample's ten-minute mark, A3).
     func testADropEndsTheRunAndBoundsTheResetFromBelow() throws {
         let series = [sample(0, fh: 40), sample(15, fh: 2), sample(30, fh: 12), sample(45, fh: 14),
                       sample(60, fh: 14), sample(75, fh: 16), sample(264, fh: 20), sample(289, fh: 22)]
         let window = try XCTUnwrap(SessionWindow.infer(from: series))
         XCTAssertEqual(window.resetsAfter, at(300))
-        XCTAssertEqual(window.resetsBy, at(315))
+        XCTAssertEqual(window.resetsBy, at(310))
     }
 
     func testAZeroInsideTheRunDoesNotMoveEitherBound() throws {
         // Christy's first window: a 0 at 15:13, then 2 at 15:28. The window was running by 15:28.
         let window = try XCTUnwrap(SessionWindow.infer(from: [sample(0, fh: 0), sample(15, fh: 2), sample(30, fh: 4)]))
-        XCTAssertEqual(window.resetsBy, at(315))
+        XCTAssertEqual(window.resetsBy, at(310), "the 2 at +15 m, at its ten-minute mark")
         XCTAssertEqual(window.resetsAfter, at(30))
     }
 
@@ -174,12 +177,12 @@ final class UsageHistoryTests: XCTestCase {
         let series = [sample(0, fh: 30), sample(60, fh: 0), sample(72, fh: 12)]
         let window = try XCTUnwrap(SessionWindow.infer(from: series))
         XCTAssertEqual(window.resetsAfter, at(300), "five hours after the 30, not after the 0")
-        XCTAssertEqual(window.resetsBy, at(372))
+        XCTAssertEqual(window.resetsBy, at(370))
     }
 
     func testAGapOfFiveHoursOrMoreStartsANewRunEvenWhenUsageKeptRising() throws {
         let window = try XCTUnwrap(SessionWindow.infer(from: [sample(0, fh: 7), sample(336, fh: 13)]))
-        XCTAssertEqual(window.resetsBy, at(636))
+        XCTAssertEqual(window.resetsBy, at(630))
         XCTAssertEqual(window.resetsAfter, at(336), "the latest sample; the old window's +5 h is already past")
     }
 
@@ -346,14 +349,14 @@ final class UsageHistoryTests: XCTestCase {
         let series = [sample(0, fh: 40), sample(15, fh: 2), sample(30, fh: 12)]
         let reading = try XCTUnwrap(UsageReading.make(samples: series, now: at(40)))
         let row = try XCTUnwrap(reading.rows.first)
-        XCTAssertEqual(UsageText.trailing(for: row, in: reading, time: minutes), "resets by +315m (est.)")
+        XCTAssertEqual(UsageText.trailing(for: row, in: reading, time: minutes), "resets by +310m (est.)")
         XCTAssertEqual(UsageText.row(row), "5h 12%")
     }
 
     func testTooltipStatesTheIntervalAndTheRecordingCaveat() throws {
         let series = [sample(0, fh: 40), sample(15, fh: 2), sample(30, fh: 12)]
         let tooltip = UsageText.tooltip(try XCTUnwrap(UsageReading.make(samples: series, now: at(40))), time: minutes)
-        XCTAssertTrue(tooltip.contains("Estimated: the 5-hour window ends between +300m and +315m"), tooltip)
+        XCTAssertTrue(tooltip.contains("Estimated: the 5-hour window ends between +300m and +310m"), tooltip)
         XCTAssertTrue(tooltip.contains("records usage only while this account is open"), tooltip)
     }
 
@@ -379,5 +382,33 @@ final class UsageHistoryTests: XCTestCase {
             UsageText.accessibilityText(reading, profileLabel: "Christy", time: minutes),
             "Christy usage: 5h 22 percent, week 92 percent, estimated reset by +300m, 45 min ago"
         )
+    }
+
+    /// The sampled window (30 % at 18:00) ended by 23:00; a new one filled up and Claude Code
+    /// recorded the limit hit at 00:26, resetting at 02:10. The 5h row reads 100 %, recorded, with
+    /// "resets 2:10 AM", as the line says the window is full — not "—" beside a lighter segment
+    /// drawing the recorded hit as an estimate. A cached usage check naming the end is no hit.
+    func testRecordedFiveHourHitAfterTheSampledWindowShowsFull() throws {
+        let pdt = UsageFixtures.pdt
+        let now = pdt("2026-10-06 00:31")
+        let samples = [UsageSample(sampledAt: pdt("2026-10-05 18:00"), org: "o", utilization: ["fh": 30, "sd": 40])]
+        let hit = LimitAnchor(resetsAt: pdt("2026-10-06 02:10"), kind: .fiveHour, hitAt: pdt("2026-10-06 00:26"))
+        let clock = AdvisorFixtures.clock(now)
+        let reading = try XCTUnwrap(UsageReading.make(samples: samples, anchors: [hit], now: now))
+        let row = try XCTUnwrap(reading.rows.first { $0.key == "fh" })
+        XCTAssertEqual(row.value, .percent(100))
+        XCTAssertEqual(reading.session?.exactEnd, hit.resetsAt)
+        XCTAssertEqual(UsageText.trailing(for: row, in: reading, time: clock.time), "resets 2:10 AM")
+
+        let f = UsageForecast.make(profileID: "personal", samples: samples, activity: UsageFixtures.ledger([], anchors: [hit]), exact: nil,
+                                   busySessions: [], costs: AdvisorFixtures.a15, now: now)
+        XCTAssertEqual(f.reading?.rows.first { $0.key == "fh" }?.value, .percent(100))
+        XCTAssertEqual(ForecastText.line(f, indexState: .ready(indexedThrough: now), clock: clock), "5h window full \u{2014} clears 2:10 AM")
+        XCTAssertNil(f.estimatedPercent(for: "fh"), "recorded, not a lighter estimate")
+
+        // Without the hit the sampled window has ended; a cached report of the same end is no hit.
+        XCTAssertEqual(UsageReading.make(samples: samples, anchors: [], now: now)?.rows.first?.value, .ended)
+        let cached = LimitAnchor(resetsAt: hit.resetsAt, kind: .fiveHour, hitAt: hit.hitAt, source: .cachedUsage)
+        XCTAssertEqual(UsageReading.make(samples: samples, anchors: [cached], now: now)?.rows.first?.value, .ended)
     }
 }
