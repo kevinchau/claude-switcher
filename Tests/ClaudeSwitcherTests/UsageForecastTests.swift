@@ -83,9 +83,11 @@ final class UsageForecastTests: XCTestCase {
         let now = reset.addingTimeInterval(1.4 * 86400)
         let ledger = F.ledger(calls(63, spend: 13.5, every: 1800, ending: now.addingTimeInterval(-60)), anchors: F.personalWeeklyAnchors)
         let f = make([UsageSample(sampledAt: reset, org: "o", utilization: ["sd": 0])], ledger, now: now)
+        // 63 recorded + the 6-point floor + 2 points for each of the 1.4 days since the sample.
+        let high: Double = 63 + 6 + 2 * 1.4
         XCTAssertEqual(f.weekUsed.value, 63, accuracy: 0.01)
-        XCTAssertEqual(f.weekUsed.high, 63 + 6 + 2 * 1.4, accuracy: 0.01, "72, not 85")
-        XCTAssertEqual(f.headroom.low, 100 - 71.8, accuracy: 0.01)
+        XCTAssertEqual(f.weekUsed.high, high, accuracy: 0.01, "72, not 85")
+        XCTAssertEqual(f.headroom.low, 100 - high, accuracy: 0.01)
         XCTAssertEqual(f.weekUsed.basis, .recordedPlusActivity)
     }
 
