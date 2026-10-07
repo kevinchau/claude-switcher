@@ -14,6 +14,15 @@ jobs:
         run: swift --version
       - name: Build
         run: swift build -c release
+      # Swift's type checker has a time limit, and this runner's toolchain is older and slower
+      # than a developer's Mac: an expression that is fine locally can fail to compile here.
+      # List everything that comes near the limit, so a fix covers all of them at once.
+      - name: Slow type-checking report (warnings only)
+        run: |
+          swift build --build-tests \
+            -Xswiftc -Xfrontend -Xswiftc -warn-long-expression-type-checking=100 \
+            -Xswiftc -Xfrontend -Xswiftc -warn-long-function-bodies=300 2>&1 \
+            | grep -E 'took [0-9]+ms' | sed -E 's#^.*/(Sources|Tests)/#\1/#' | sort -u || true
       - name: Test
         run: swift test
       - name: Bundle (ad-hoc signed)
