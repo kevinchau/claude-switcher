@@ -38,7 +38,7 @@ struct SessionMenuData: Equatable, Sendable {
         for source in profiles {
             guard let listing = data.listings[source.id] else { continue }
             // Only for the rows the menu will show, and only where the session itself can be copied.
-            for session in listing.sessions.prefix(visibleSessions) where session.obstacle == nil {
+            for session in listing.sessions.prefix(listing.visibleCount(limit: visibleSessions)) where session.obstacle == nil {
                 for target in profiles where target.id != source.id {
                     let refusal = SessionCopy.obstacle(for: session, from: source, to: target,
                                                        allProfiles: profiles, environment: environment)
@@ -103,6 +103,8 @@ final class SessionCopyChoice: NSObject {
 enum SessionMenu {
 
     private nonisolated static let titleLimit = 64
+    /// Deeper sessions line up with the last level shown, so a long chain stays readable.
+    private nonisolated static let maximumIndentation = 3
 
     static func itemIdentifier(_ profileID: String) -> NSUserInterfaceItemIdentifier {
         NSUserInterfaceItemIdentifier("claude-switcher.sessions.\(profileID)")
@@ -158,10 +160,17 @@ enum SessionMenu {
             menu.addItem(MenuBuilder.informationalItem("No open sessions with a transcript on this Mac."))
         }
         let others = input.config.profiles.filter { $0.id != profile.id }
-        for session in listing.sessions.prefix(SessionMenuData.visibleSessions) {
+        for session in listing.sessions.prefix(listing.visibleCount(limit: SessionMenuData.visibleSessions)) {
             let title = displayTitle(session)
             let row = NSMenuItem(title: shortened(title), action: nil, keyEquivalent: "")
-            row.badge = NSMenuItemBadge(string: session.isRunning ? "open" : age(session.record.lastActivityAt, now: input.now))
+            // Indented under the session it was started from, as in the Code tab's sidebar.
+            row.indentationLevel = min(session.depth, maximumIndentation)
+            let badge = session.isRunning ? "open" : age(session.record.lastActivityAt, now: input.now)
+            if session.depth > 0, let parent = session.startedFrom {
+                // A label of our own replaces AppKit's, which would have read the badge too.
+                row.setAccessibilityLabel("\(title), started from \(parentTitle(parent)), \(badge)")
+            }
+            row.badge = NSMenuItemBadge(string: badge)
             row.submenu = actionsMenu(for: session, title: title, source: profile, others: others,
                                       data: data, isCopying: input.copyProgress != nil || input.switcher.isCommitting,
                                       now: input.now, target: target, action: action)
@@ -228,6 +237,11 @@ enum SessionMenu {
         return folder.isEmpty || folder == "/" ? "Untitled session" : "Untitled \u{2014} \(folder)"
     }
 
+    nonisolated static func parentTitle(_ parent: SessionFamilies.Parent) -> String {
+        if let title = parent.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
+        return "an untitled session"
+    }
+
     // MARK: - Unfinished copies and what recovery did
 
     /// The one line a recovery pass at launch leaves in the menu; the notes themselves go in
@@ -277,7 +291,7 @@ enum SessionMenu {
     /// One line for everything that is not listed, with only the counts that are not zero.
     static func footer(_ listing: SessionListing) -> String? {
         var parts: [String] = []
-        let older = listing.sessions.count - SessionMenuData.visibleSessions
+        let older = listing.sessions.count - listing.visibleCount(limit: SessionMenuData.visibleSessions)
         if older > 0 { parts.append("\(older) older") }
         if listing.hidden.archived > 0 { parts.append("\(listing.hidden.archived) archived") }
         if listing.hidden.withoutTranscript > 0 { parts.append("\(listing.hidden.withoutTranscript) with no transcript on this Mac") }
@@ -291,6 +305,12 @@ enum SessionMenu {
     static func details(_ session: ListedSession, title: String, now: Date) -> [String] {
         var lines: [String] = []
         if title.count > titleLimit { lines.append(shortened(title, limit: 2 * titleLimit)) }
+        if let parent = session.startedFrom {
+            lines.append("Started from \u{201C}\(shortened(parentTitle(parent)))\u{201D}" + (parent.isListed ? "" : parent.isArchived ? " (archived)" : " (not listed)"))
+        }
+        if session.startedCount > 0 {
+            lines.append("\(session.startedCount) session\(session.startedCount == 1 ? " was" : "s were") started from this one")
+        }
         lines.append("Folder: " + shortenedPath(session.record.cwd))
         if let last = session.record.lastActivityAt {
             lines.append("Last active: \(MenuBuilder.clock(last, now: now)) (\(age(last, now: now)))")

@@ -80,6 +80,19 @@ final class CopyRecordTests: XCTestCase {
 
     /// A source record carrying every account-bound field Claude knows: none of their values,
     /// nor the original's ids, reach the copy's bytes.
+    /// A sub-session's link names a session of the original's account: the copy is a session of its own.
+    func testACopyOfASessionStartedFromAnotherCarriesNoLink() throws {
+        let parent = "local_22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let fields: [String: Any] = ["sessionId": sourceID, "cliSessionId": x, "cwd": "/Users/me/app",
+                                     "spawnedFrom": ["sessionId": parent, "taskId": "task_1", "sideSession": true]]
+        let record = try XCTUnwrap(SessionStore.record(from: JSONSerialization.data(withJSONObject: fields), fileStem: sourceID))
+        XCTAssertEqual(record.spawnedFromSessionId, parent)
+
+        let text = String(decoding: CopyRecord.bytes(forCopyOf: record, newID: newID, now: now), as: UTF8.self)
+        XCTAssertFalse(text.contains("spawnedFrom"), text)
+        XCTAssertFalse(text.contains("22222222"), text)
+    }
+
     func testNothingAccountBoundLeaksFromASourceRecordThatHasEverything() throws {
         let bound = [
             "titleSource", "chromePermissionMode", "adoptedFromOtherSurface", "surfaceNoticeUuid", "importedFrom",

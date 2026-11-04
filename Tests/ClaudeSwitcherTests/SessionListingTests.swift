@@ -77,6 +77,23 @@ final class SessionListingTests: XCTestCase {
         XCTAssertEqual(result.hidden.total, 5)
     }
 
+    func testASessionStartedFromAnotherIsListedUnderIt() throws {
+        try session(1)
+        try session(2, extra: ["spawnedFrom": ["sessionId": "local_\(uuid(1))", "taskId": "task_1", "sideSession": true]])
+        try session(3, extra: ["isArchived": true])
+        try session(4, extra: ["spawnedFrom": ["sessionId": "local_\(uuid(3))"]])
+        try session(5)
+
+        let result = listing()
+        XCTAssertEqual(result.sessions.map(\.id), [5, 4, 1, 2].map { "local_\(uuid($0))" })
+        XCTAssertEqual(result.sessions.map(\.depth), [0, 0, 0, 1])
+        XCTAssertEqual(result.sessions.map(\.startedCount), [0, 0, 1, 0])
+        XCTAssertEqual(result.sessions[1].startedFrom?.isArchived, true)
+        XCTAssertEqual(result.sessions[3].startedFrom?.title, "Session 1")
+        XCTAssertEqual(result.sessions[3].obstacle, nil, "being started from another session is no reason not to copy it")
+        XCTAssertEqual(result.hidden.archived, 1)
+    }
+
     func testAProfileWithoutItsOwnStoreListsNothing() throws {
         try FileManager.default.removeItem(at: storeA.url.deletingLastPathComponent())
         try home.makeStore(userDataDir: nil, account: FakeHome.accountB, org: FakeHome.orgB)

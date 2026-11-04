@@ -412,6 +412,28 @@ final class SessionCatalogTests: XCTestCase {
         }
     }
 
+    /// `spawnedFrom.sessionId` names the session this one was started from — only when it is a
+    /// record id; anything else in its place is no link.
+    func testTheSessionASessionWasStartedFromIsRead() throws {
+        let parent = "local_\(s2)"
+        let cases: [(Any?, String?)] = [
+            (["sessionId": parent, "taskId": "task_1", "title": "T", "sideSession": true], parent),
+            (["sessionId": parent], parent),
+            (["sessionId": s2], nil),
+            (["sessionId": "local_not-a-uuid"], nil),
+            (["sessionId": 7], nil),
+            (["taskId": "task_1"], nil),
+            (parent, nil),
+            (NSNull(), nil),
+            (nil, nil),
+        ]
+        for (value, expected) in cases {
+            let data = try JSONSerialization.data(withJSONObject: record(s1, value.map { ["spawnedFrom": $0] } ?? [:]))
+            let parsed = try XCTUnwrap(SessionStore.record(from: data, fileStem: "local_\(s1)"), "\(String(describing: value))")
+            XCTAssertEqual(parsed.spawnedFromSessionId, expected, "\(String(describing: value))")
+        }
+    }
+
     func testTheWorkingFolderSaysWhetherItIsAWorktreeOrAScratchWorkspace() {
         func folder(_ cwd: String) -> SessionRecord { SessionRecord(id: "local_\(s1)", cliSessionId: nil, title: nil, cwd: cwd) }
         XCTAssertTrue(folder("/Users/me/repo/.claude/worktrees/feature").isInClaudeWorktreeFolder)

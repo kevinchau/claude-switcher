@@ -42,13 +42,16 @@ public struct SessionRecord: Equatable, Sendable, Identifiable {
     /// The earlier transcripts' ids, where the record names them. Deleting the session in
     /// Claude removes these too, so they count as claimed by this record.
     public let earlierCliSessionIds: [String]
+    /// The session this one was started from (`spawnedFrom.sessionId`, a `local_<uuid>`): Claude
+    /// lists such a session under that one in the Code tab's sidebar. Never carried by a copy.
+    public let spawnedFromSessionId: String?
 
     public init(
         id: String, cliSessionId: String?, title: String?, cwd: String, originCwd: String? = nil,
         createdAt: Date? = nil, lastActivityAt: Date? = nil, isArchived: Bool = false,
         model: String? = nil, effort: String? = nil, chromePermissionMode: String? = nil,
         isRemote: Bool = false, hasWorktree: Bool = false, hasEarlierTranscripts: Bool = false,
-        earlierCliSessionIds: [String] = []
+        earlierCliSessionIds: [String] = [], spawnedFromSessionId: String? = nil
     ) {
         self.id = id
         self.cliSessionId = cliSessionId
@@ -65,6 +68,7 @@ public struct SessionRecord: Equatable, Sendable, Identifiable {
         self.hasWorktree = hasWorktree
         self.hasEarlierTranscripts = hasEarlierTranscripts
         self.earlierCliSessionIds = earlierCliSessionIds
+        self.spawnedFromSessionId = spawnedFromSessionId
     }
 
     /// The working folder is inside a Claude Code worktree (`…/.claude/worktrees/…`). Compared
@@ -322,7 +326,10 @@ public enum SessionStore {
             isRemote: fields.isRemote,
             hasWorktree: fields.hasWorktree,
             hasEarlierTranscripts: fields.hasEarlierTranscripts,
-            earlierCliSessionIds: earlier
+            earlierCliSessionIds: earlier,
+            spawnedFromSessionId: fields.spawnedFromSessionId.flatMap { id in
+                id.hasPrefix(recordPrefix) && isUUID(String(id.dropFirst(recordPrefix.count))) ? id : nil
+            }
         )
     }
 
@@ -525,12 +532,24 @@ private struct RecordFields: Decodable {
     var priorCliSessionIds: [String] = []
     var unarchivedCliSessionId: String?
     var preClearCliSessionId: String?
+    var spawnedFromSessionId: String?
 
     private enum Key: String, CodingKey {
         case sessionId, cliSessionId, title, cwd, originCwd, createdAt, lastActivityAt, isArchived
         case model, effort, chromePermissionMode, sshConfig, wslConfig
         case worktreePath, worktreeName, branch, sourceBranch, worktreeLazy, keptWorktreeLeftover, keptDirtyWorktree
         case priorCliSessionIds, unarchivedCliSessionId, preClearCliSessionId
+        case spawnedFrom
+    }
+
+    /// `spawnedFrom: {sessionId, taskId, title, sideSession?, name?, …}` — only the parent's id is read.
+    private struct SpawnedFrom: Decodable {
+        var sessionId: String?
+        private enum Key: String, CodingKey { case sessionId }
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Key.self)
+            sessionId = (try? container.decodeIfPresent(String.self, forKey: .sessionId)) ?? nil
+        }
     }
 
     init(from decoder: Decoder) throws {
@@ -556,6 +575,7 @@ private struct RecordFields: Decodable {
                        .keptWorktreeLeftover, .keptDirtyWorktree].contains(where: truthy)
         unarchivedCliSessionId = string(.unarchivedCliSessionId)
         preClearCliSessionId = string(.preClearCliSessionId)
+        spawnedFromSessionId = ((try? container.decodeIfPresent(SpawnedFrom.self, forKey: .spawnedFrom)) ?? nil)?.sessionId
         let prior: [String]? = (try? container.decodeIfPresent([String].self, forKey: .priorCliSessionIds)) ?? nil
         priorCliSessionIds = prior ?? []
         // An empty list names no earlier transcript; anything else that is not a list of ids
@@ -682,7 +702,9 @@ public enum TranscriptLocator {
 /// What the menu shows for one account. Built off the main thread.
 public struct SessionListing: Equatable, Sendable {
     public let location: SessionStoreLocation
-    /// Non-archived local sessions with a transcript on disk, newest activity first.
+    /// Non-archived local sessions with a transcript on disk, as the Code tab's sidebar nests
+    /// them: each session followed by the ones started from it (see ``SessionFamilies``), the
+    /// families newest activity first.
     public let sessions: [ListedSession]
     public let hidden: HiddenCounts
 
@@ -700,6 +722,15 @@ public struct SessionListing: Equatable, Sendable {
         }
 
         public var total: Int { archived + withoutTranscript + remote }
+    }
+
+    /// How many of ``sessions`` a list of about `limit` rows shows: `limit`, and then the rest of
+    /// the family the last of them belongs to, so a session is never shown without the sessions
+    /// started from it. The rows left out are whole families, none newer than the last one shown.
+    public func visibleCount(limit: Int) -> Int {
+        var count = min(max(limit, 0), sessions.count)
+        while count > 0, count < sessions.count, sessions[count].depth > 0 { count += 1 }
+        return count
     }
 
     public init(location: SessionStoreLocation, sessions: [ListedSession], hidden: HiddenCounts) {
@@ -726,7 +757,8 @@ public struct SessionListing: Equatable, Sendable {
 
         var sessions: [ListedSession] = []
         var archived = 0, withoutTranscript = 0, remote = 0
-        for record in SessionStore.records(in: folder) {
+        let records = SessionStore.records(in: folder)
+        for record in records {
             if record.isArchived { archived += 1; continue }
             if record.isRemote { remote += 1; continue }
             guard let cliSessionId = record.cliSessionId,
@@ -744,7 +776,7 @@ public struct SessionListing: Equatable, Sendable {
                 isRunning: running.isOpen(record), obstacle: obstacle))
         }
         return SessionListing(
-            location: location, sessions: sessions,
+            location: location, sessions: SessionFamilies.arrange(sessions, allRecords: records),
             hidden: HiddenCounts(archived: archived, withoutTranscript: withoutTranscript, remote: remote))
     }
 }
@@ -758,12 +790,22 @@ public struct ListedSession: Equatable, Sendable, Identifiable {
     /// Why this session cannot be copied to ANY account, judged without reference to a target
     /// (worktree, several transcripts, folder missing, still replying, registered in two accounts…).
     public let obstacle: SessionCopy.Refusal?
+    /// How far under the session it was started from this one is listed: 0 at the top level.
+    public internal(set) var depth = 0
+    /// The session this one was started from, when that one is still in this account's store.
+    public internal(set) var startedFrom: SessionFamilies.Parent?
+    /// How many listed sessions were started from this one.
+    public internal(set) var startedCount = 0
 
-    public init(record: SessionRecord, transcriptBytes: Int, isRunning: Bool, obstacle: SessionCopy.Refusal?) {
+    public init(record: SessionRecord, transcriptBytes: Int, isRunning: Bool, obstacle: SessionCopy.Refusal?,
+                depth: Int = 0, startedFrom: SessionFamilies.Parent? = nil, startedCount: Int = 0) {
         self.record = record
         self.transcriptBytes = transcriptBytes
         self.isRunning = isRunning
         self.obstacle = obstacle
+        self.depth = depth
+        self.startedFrom = startedFrom
+        self.startedCount = startedCount
     }
 
     /// The target-independent part of preflight, cheapest and most fundamental first. The
