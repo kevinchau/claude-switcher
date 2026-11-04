@@ -95,6 +95,11 @@ final class CopyRun {
         let prefix = try snapshot()
         let scan = TranscriptScan.scan(prefix)
         if let refusal = scan.refusal { throw refusal }
+        // After a clear, a rewind or an unarchive only the current transcript is copied; it
+        // must hold the conversation Claude would continue on its own.
+        if record.hasEarlierTranscripts, scan.conversationReachesOutside {
+            throw SessionCopy.Refusal.continuesInEarlierTranscript
+        }
         let sources = try findSubagentSources(scan.referencedAgentIds)
         try requireSpace(bytes: UInt64(prefix.count + scan.clearBytes.count) + sources.reduce(0) { $0 + UInt64(max($1.size, 0)) })
         try step(.scanned)

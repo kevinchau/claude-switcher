@@ -181,6 +181,15 @@ final class SessionListingTests: XCTestCase {
 
     // MARK: - Why a session cannot be copied anywhere
 
+    /// After a clear, a rewind or an unarchive the session is offered: the copy takes the
+    /// current transcript, and checks when it reads it that the conversation is all there.
+    func testASessionWithEarlierTranscriptsIsOffered() throws {
+        try session(6, extra: ["priorCliSessionIds": [cli(99)]])
+        try session(7, extra: ["unarchivedCliSessionId": cli(98)])
+        try session(8, extra: ["preClearCliSessionId": cli(97)])
+        for n in 6...8 { XCTAssertNil(listed(n)?.obstacle, "\(n)") }
+    }
+
     func testEachReasonASessionCannotBeCopiedIsReported() throws {
         let worktree = try home.makeDirectory("work/repo/.claude/worktrees/feature")
         let scratch = try home.makeDirectory("Library/Application Support/Claude/scratch-workspaces/a/o/scratch-2026-10-05-abcdef")
@@ -191,8 +200,6 @@ final class SessionListingTests: XCTestCase {
             (3, nil, ["keptDirtyWorktree": true], .inWorktree),
             (4, worktree, [:], .inWorktree),
             (5, scratch, [:], .inScratchWorkspace),
-            (6, nil, ["priorCliSessionIds": [cli(99)]], .severalTranscripts),
-            (7, nil, ["unarchivedCliSessionId": cli(98)], .severalTranscripts),
             (8, nil, ["originCwd": "/Users/me/elsewhere"], .originFolderDiffers),
             (9, gone, [:], .workingFolderMissing(cwd: gone)),
             (10, "relative/app", [:], .workingFolderNotAbsolute),
@@ -412,7 +419,7 @@ final class SessionListingTests: XCTestCase {
             .notAutomationLockHolder, .lockFileUnavailable, .anotherCopyRunning, .sessionChanged, .sessionDeleted, .archived,
             .noTranscriptYet, .transcriptMissing, .transcriptEmpty, .stillBeingWritten, .stillReplying, .remote,
             .workingFolderNotAbsolute, .workingFolderMissing(cwd: cwd), .workingFolderUnreachable(cwd: cwd), .mentionsOwnID,
-            .inWorktree, .inScratchWorkspace, .originFolderDiffers, .severalTranscripts,
+            .inWorktree, .inScratchWorkspace, .originFolderDiffers, .continuesInEarlierTranscript,
             .claimedByTwoAccounts, .watchingArtifactComments, .remoteControlUnclearable, .unreadableTranscriptLine,
             .notEnoughSpace, .sameProfile, .sameAccount(source: "Personal", target: "Work"),
             .targetSignedOut(target: "Work"), .targetNeverSignedIn(target: "Work"), .targetHasNoSessions(target: "Work"),

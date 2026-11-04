@@ -48,6 +48,12 @@ enum TranscriptScan {
         var hasUnreadableMarkerLine = false
         /// `toolUseResult.agentId` of qualifying rows, first-seen order, each `[A-Za-z0-9_-]+`.
         var referencedAgentIds: [String] = []
+        /// The conversation Claude would continue — from the last main-thread user or assistant
+        /// line back through `parentUuid` — reaches a line that is not in this transcript, or
+        /// loops. A chain ends at a line whose `parentUuid` is absent or null (the start, or a
+        /// compaction). After a clear or a rewind Claude starts a new transcript; this says
+        /// whether the current one holds its conversation on its own.
+        var conversationReachesOutside = false
 
         /// The lines to append so no copied Remote Control pointer is live.
         var clearBytes: Data { TranscriptScan.clearLines(for: liveBridgeSessionIds) }
@@ -64,6 +70,18 @@ enum TranscriptScan {
 
     /// The length of the part of `data` that ends in a line feed — everything after the last
     /// LF is a line still being written. `nil` when there is no complete line.
+    /// Walks `parentUuid` back from `start`: true on a parent with no line here, or a loop.
+    static func reachesOutside(from start: String, parents: [String: String?]) -> Bool {
+        var seen: Set<String> = []
+        var current = start
+        while seen.insert(current).inserted {
+            guard let entry = parents[current] else { return true }
+            guard let parent = entry else { return false }
+            current = parent
+        }
+        return true
+    }
+
     static func completeLength(of data: Data) -> Int? {
         guard let last = data.lastIndex(of: lineFeed) else { return nil }
         return data.distance(from: data.startIndex, to: last) + 1
@@ -78,6 +96,9 @@ enum TranscriptScan {
         var worktree = OrderedLastValues<String, Bool>()
         var monitors: [MonitorKey: Bool] = [:]
         var agents = Set<String>()
+        // uuid -> parentUuid, for every line with a string uuid; nil is a start.
+        var parents: [String: String?] = [:]
+        var lastMessage: String?
 
         forEachLine(in: prefix) { line in
             autoreleasepool {
@@ -86,6 +107,11 @@ enum TranscriptScan {
                     return
                 }
                 let type = object["type"] as? String
+
+                if let uuid = object["uuid"] as? String, !uuid.isEmpty {
+                    parents[uuid] = object["parentUuid"] as? String
+                    if type == "user" || type == "assistant", !jsTruthy(object["isSidechain"]) { lastMessage = uuid }
+                }
 
                 switch type {
                 case "bridge-session":
@@ -131,6 +157,7 @@ enum TranscriptScan {
         result.hasUnclearableBridge = unclearable.values.contains(true)
         result.worktreeBoundSessionIds = worktree.keys.filter { worktree[$0] == true }
         result.activeArtifactMonitors = monitors.values.filter { $0 }.count
+        result.conversationReachesOutside = lastMessage.map { reachesOutside(from: $0, parents: parents) } ?? false
         return result
     }
 

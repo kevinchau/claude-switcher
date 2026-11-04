@@ -788,7 +788,7 @@ public struct ListedSession: Equatable, Sendable, Identifiable {
     /// The session is open in a running Claude right now (registry entry with a live pid).
     public let isRunning: Bool
     /// Why this session cannot be copied to ANY account, judged without reference to a target
-    /// (worktree, several transcripts, folder missing, still replying, registered in two accounts…).
+    /// (worktree, folder missing, still replying, registered in two accounts…).
     public let obstacle: SessionCopy.Refusal?
     /// How far under the session it was started from this one is listed: 0 at the top level.
     public internal(set) var depth = 0
@@ -816,7 +816,6 @@ public struct ListedSession: Equatable, Sendable, Identifiable {
     ) -> SessionCopy.Refusal? {
         if record.hasWorktree || record.isInClaudeWorktreeFolder { return .inWorktree }
         if record.isInScratchWorkspace { return .inScratchWorkspace }
-        if record.hasEarlierTranscripts { return .severalTranscripts }
         guard record.cwd.hasPrefix("/") else { return .workingFolderNotAbsolute }
         if let origin = record.originCwd, origin != record.cwd { return .originFolderDiffers }
         if stores > 1 { return .claimedByTwoAccounts }

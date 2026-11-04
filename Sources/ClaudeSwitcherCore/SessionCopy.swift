@@ -189,7 +189,9 @@ public enum SessionCopy {
         case inWorktree
         case inScratchWorkspace
         case originFolderDiffers
-        case severalTranscripts
+        /// The session has had earlier transcripts, and the conversation in its current one
+        /// reaches back into a line that is not in it.
+        case continuesInEarlierTranscript
         case claimedByTwoAccounts
         // What its transcript carries
         case watchingArtifactComments
@@ -269,8 +271,8 @@ public enum SessionCopy {
                 return "This session works in a scratch workspace, which Claude removes along with the session."
             case .originFolderDiffers:
                 return "This session has moved away from the folder it started in."
-            case .severalTranscripts:
-                return "This session spans several conversation files (after a clear, a rewind or an unarchive)."
+            case .continuesInEarlierTranscript:
+                return "This session\u{2019}s current conversation is not whole in its own file (it continues in an earlier one), so a copy would miss part of it."
             case .claimedByTwoAccounts:
                 return "This session is already registered in two accounts; deleting it in either would remove it from both."
             case .watchingArtifactComments:
@@ -660,8 +662,13 @@ public enum SessionCopy {
     // MARK: - The confirmation
 
     /// The text of the confirmation, so it is testable and in one place.
-    public static func confirmationCaveats(sourceLabel: String, targetLabel: String, cwd: String) -> [String] {
-        [
+    public static func confirmationCaveats(sourceLabel: String, targetLabel: String, cwd: String,
+                                           hasEarlierTranscripts: Bool = false) -> [String] {
+        let earlier = hasEarlierTranscripts
+            ? ["Only the current conversation is copied, as Claude would continue it. What came before a clear, or the "
+                + "branch left behind by a rewind, stays with the original."]
+            : []
+        let caveats = [
             "This makes an independent copy of the session as it is right now. Later messages in one are not added to the other.",
             "The copy appears in \(targetLabel)\u{2019}s Code tab the next time that Claude starts. Claude Switcher will not quit "
                 + "Claude for you. Quit it yourself when its sessions are idle and open it again. Closing the window or "
@@ -680,6 +687,8 @@ public enum SessionCopy {
             "A copy taken shortly after Claude was working may end mid-turn; that turn shows as interrupted in the copy.",
             "A session Claude has hidden from history stays hidden in the copy.",
         ]
+        // After the two the alert shows in its body: what the copy is, and when it shows up.
+        return Array(caveats.prefix(2)) + earlier + Array(caveats.dropFirst(2))
     }
 }
 

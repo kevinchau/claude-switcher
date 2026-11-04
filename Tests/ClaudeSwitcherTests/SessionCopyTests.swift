@@ -224,6 +224,68 @@ final class SessionCopyTests: XCTestCase {
         }
     }
 
+    // MARK: - Sessions with earlier transcripts
+
+    private static let earlier = "d1d1d1d1-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    /// Lines of a conversation: each names the one before it, the first `parentUuid` given.
+    private func chain(_ ids: [String], from first: String?) -> [String] {
+        var lines: [String] = []
+        var parent = first
+        for (index, id) in ids.enumerated() {
+            let type = index % 2 == 0 ? "user" : "assistant"
+            let parentJSON = parent.map { "\"\($0)\"" } ?? "null"
+            lines.append(#"{"type":"\#(type)","sessionId":"\#(CopyFixture.x)","uuid":"\#(id)","parentUuid":\#(parentJSON)}"#)
+            parent = id
+        }
+        return lines
+    }
+
+    /// After a clear, a rewind or an unarchive the current transcript is copied — exactly as a
+    /// session with one transcript is — and the earlier one is neither read into the copy nor
+    /// named by its record. A chain may start at a compaction (a null parent) inside it.
+    func testASessionWithEarlierTranscriptsCopiesItsCurrentOne() throws {
+        let compaction = #"{"type":"system","subtype":"compact_boundary","uuid":"c0","parentUuid":null,"logicalParentUuid":"p9"}"#
+        for field in ["priorCliSessionIds", "unarchivedCliSessionId", "preClearCliSessionId"] {
+            let value: Any = field == "priorCliSessionIds" ? [Self.earlier] : Self.earlier
+            let f = try CopyFixture(lines: [compaction] + chain(["m1", "m2", "m3"], from: "c0"),
+                                    record: [field: value], subagents: false)
+            let earlierURL = f.projectFolder.appendingPathComponent(Self.earlier + ".jsonl")
+            try f.write(#"{"type":"user","uuid":"p9","parentUuid":null}"# + "\n", to: earlierURL)
+            let earlierBytes = try Data(contentsOf: earlierURL)
+
+            guard case .copied = f.copy() else { XCTFail(field); continue }
+            XCTAssertEqual(try Data(contentsOf: f.copyURL), Data((f.lines.joined(separator: "\n") + "\n").utf8), field)
+            XCTAssertEqual(try Data(contentsOf: earlierURL), earlierBytes, field)
+            let record = String(decoding: try Data(contentsOf: f.recordURL), as: UTF8.self)
+            XCTAssertFalse(record.contains("d1d1d1d1"), field)
+            XCTAssertTrue(SessionCopy.confirmationCaveats(sourceLabel: "A", targetLabel: "B", cwd: f.cwd,
+                                                          hasEarlierTranscripts: true)[2].contains("Only the current conversation"))
+        }
+    }
+
+    /// When the conversation Claude would continue reaches a line that is only in an earlier
+    /// transcript — or loops — the copy would be missing part of it, and is refused.
+    func testAConversationThatReachesIntoAnEarlierTranscriptIsRefused() throws {
+        let sidechain = #"{"type":"assistant","isSidechain":true,"uuid":"s1","parentUuid":"nowhere"}"#
+        for lines in [chain(["m1", "m2"], from: "p9"),
+                      chain(["m1", "m2"], from: "m2"),
+                      chain(["m1", "m2"], from: "p9") + [sidechain]] {
+            assertRefused(.continuesInEarlierTranscript,
+                          try CopyFixture(lines: lines, record: ["priorCliSessionIds": [Self.earlier]], subagents: false))
+        }
+        // A sidechain line is not the conversation: it does not decide.
+        let f = try CopyFixture(lines: chain(["m1", "m2"], from: nil) + [sidechain],
+                                record: ["priorCliSessionIds": [Self.earlier]], subagents: false)
+        guard case .copied = f.copy() else { return XCTFail("not copied") }
+    }
+
+    /// A session with one transcript is copied as before, whatever its chain looks like.
+    func testASessionWithOneTranscriptIsNotCheckedForItsChain() throws {
+        let f = try CopyFixture(lines: chain(["m1", "m2"], from: "p9"), subagents: false)
+        guard case .copied = f.copy() else { return XCTFail("not copied") }
+    }
+
     // MARK: - 7. The record
 
     func testTheRecordHasOnlyTheAllowedKeysAndNothingOfTheOriginalsAccount() throws {
@@ -394,9 +456,6 @@ final class SessionCopyTests: XCTestCase {
             ("keptWorktreeLeftover", .inWorktree, ["keptWorktreeLeftover": true]),
             ("keptDirtyWorktree", .inWorktree, ["keptDirtyWorktree": true]),
             ("origin", .originFolderDiffers, ["originCwd": "/Users/me/elsewhere"]),
-            ("prior", .severalTranscripts, ["priorCliSessionIds": ["d1d1d1d1-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]]),
-            ("unarchived", .severalTranscripts, ["unarchivedCliSessionId": "d1d1d1d1-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]),
-            ("pre-clear", .severalTranscripts, ["preClearCliSessionId": "d1d1d1d1-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]),
         ]
         for (label, refusal, extra) in cases {
             let f = try CopyFixture(record: extra)

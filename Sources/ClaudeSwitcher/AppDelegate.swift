@@ -605,7 +605,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // What the copy is and when it shows up go in the alert itself; everything else it is
         // and is not goes underneath in full, scrollable rather than cut.
-        let caveats = SessionCopy.confirmationCaveats(sourceLabel: shownSource.label, targetLabel: shownTarget.label, cwd: choice.cwd)
+        let caveats = SessionCopy.confirmationCaveats(sourceLabel: shownSource.label, targetLabel: shownTarget.label, cwd: choice.cwd,
+                                                      hasEarlierTranscripts: choice.hasEarlierTranscripts)
         let alert = NSAlert()
         alert.messageText = "Copy \u{201C}\(SessionMenu.shortened(choice.title))\u{201D} to \(shownTarget.label)?"
         alert.informativeText = caveats.prefix(2).joined(separator: "\n\n")

@@ -19,6 +19,30 @@ final class TranscriptScanTests: XCTestCase {
         "{\"type\":\"bridge-session\",\"sessionId\":\"\(sessionId)\",\"bridgeSessionId\":\"\",\"lastSequenceNum\":0}\n"
     }
 
+    // MARK: - The conversation Claude would continue
+
+    private func message(_ uuid: String, _ parent: String?, type: String = "user", extra: [String: Any] = [:]) -> String {
+        var object: [String: Any] = ["type": type, "uuid": uuid, "parentUuid": parent ?? NSNull()]
+        for (key, value) in extra { object[key] = value }
+        return json(object)
+    }
+
+    func testTheConversationIsFollowedBackFromTheLastMessage() {
+        func outside(_ lines: [String]) -> Bool { TranscriptScan.scan(bytes(lines)).conversationReachesOutside }
+        XCTAssertFalse(outside([]))
+        XCTAssertFalse(outside([message("a", nil), message("b", "a", type: "assistant")]))
+        XCTAssertFalse(outside([json(["type": "user", "uuid": "a"]), message("b", "a")]), "no parentUuid is a start")
+        XCTAssertFalse(outside([message("x", "gone"), message("a", nil), message("b", "a")]), "an old branch does not decide")
+        XCTAssertFalse(outside([message("c", nil, type: "system"), message("a", "c"), message("b", "a")]), "a compaction starts it")
+        XCTAssertTrue(outside([message("a", "gone"), message("b", "a")]))
+        XCTAssertTrue(outside([message("a", "b"), message("b", "a")]), "a loop")
+        XCTAssertTrue(outside([message("a", "a")]), "a line that names itself")
+        XCTAssertFalse(outside([message("a", nil), message("s", "gone", type: "assistant", extra: ["isSidechain": true])]),
+                       "a sidechain is not the conversation")
+        XCTAssertTrue(outside([message("a", "gone"), json(["type": "attachment", "uuid": "t", "parentUuid": "a"])]),
+                      "the last user or assistant line decides, not the last line")
+    }
+
     // MARK: - The cut
 
     func testOnlyCompleteLinesArePartOfASnapshot() {

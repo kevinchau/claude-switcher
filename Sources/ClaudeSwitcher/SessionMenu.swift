@@ -85,14 +85,18 @@ final class SessionCopyChoice: NSObject {
     let cliSessionId: String
     let cwd: String
     let title: String
+    /// Only the current transcript is copied; the confirmation says so.
+    let hasEarlierTranscripts: Bool
 
-    init(sourceProfileID: String, targetProfileID: String, sessionID: String, cliSessionId: String, cwd: String, title: String) {
+    init(sourceProfileID: String, targetProfileID: String, sessionID: String, cliSessionId: String, cwd: String, title: String,
+         hasEarlierTranscripts: Bool = false) {
         self.sourceProfileID = sourceProfileID
         self.targetProfileID = targetProfileID
         self.sessionID = sessionID
         self.cliSessionId = cliSessionId
         self.cwd = cwd
         self.title = title
+        self.hasEarlierTranscripts = hasEarlierTranscripts
     }
 }
 
@@ -216,7 +220,8 @@ enum SessionMenu {
             item.target = target
             item.representedObject = SessionCopyChoice(
                 sourceProfileID: source.id, targetProfileID: other.id, sessionID: session.id,
-                cliSessionId: cliSessionId, cwd: session.record.cwd, title: title)
+                cliSessionId: cliSessionId, cwd: session.record.cwd, title: title,
+                hasEarlierTranscripts: session.record.hasEarlierTranscripts)
             item.isEnabled = refusal == nil && !isCopying
             item.toolTip = refusal?.message
                 ?? "Makes an independent copy of this session in \(other.label). Nothing happens until you confirm."
