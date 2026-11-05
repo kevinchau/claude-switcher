@@ -11,6 +11,9 @@ import Foundation
 /// `sessionId, cliSessionId, cwd, originCwd, createdAt, lastActivityAt, indexedAt, isArchived,
 /// title?, permissionMode, model?, effort?, sessionPermissionUpdates, alwaysAllowedReasons`
 ///
+/// and, for a session copied with the session it was started from, `spawnedFrom` naming that
+/// session's copy (see ``bytes(forCopyOf:newID:now:parentSessionID:)``).
+///
 /// Serialized by hand so the bytes are the same every time — the journal keeps their hash.
 enum CopyRecord {
 
@@ -33,7 +36,14 @@ enum CopyRecord {
     /// - `originCwd` is `cwd`: a different origin becomes the base repository for branch
     ///   deletion and a worktree fallback in the other account.
     /// - `permissionMode` is `default`; no grant crosses accounts.
-    static func bytes(forCopyOf source: SessionRecord, newID: UUID, now: Date) -> Data {
+    ///
+    /// `parentSessionID`, the `local_<uuid>` of the copy of the session this one was started
+    /// from, adds `spawnedFrom: {sessionId, taskId, title?}` — the shape Desktop writes for a
+    /// session started from another that is not a side session, so Desktop lists it under that
+    /// copy and does nothing else with it: no `sideSession` (waking the parent, its roster), no
+    /// `wakeParent`, no `sharedCheckout` or `sharedFolder` (a checkout shared with the parent).
+    /// `taskId` is `task_` and the first eight hex digits of the new id.
+    static func bytes(forCopyOf source: SessionRecord, newID: UUID, now: Date, parentSessionID: String? = nil) -> Data {
         let id = newID.uuidString.lowercased()
         let milliseconds = String(Int64((now.timeIntervalSince1970 * 1000).rounded(.down)))
 
@@ -47,12 +57,19 @@ enum CopyRecord {
             ("indexedAt", milliseconds),
             ("isArchived", "false"),
         ]
-        if let title = title(forCopyOf: source.title) { fields.append(("title", jsonString(title))) }
+        let copyTitle = title(forCopyOf: source.title)
+        if let copyTitle { fields.append(("title", jsonString(copyTitle))) }
         fields.append(("permissionMode", jsonString("default")))
         if let model = source.model, !model.isEmpty { fields.append(("model", jsonString(model))) }
         if let effort = source.effort, !effort.isEmpty { fields.append(("effort", jsonString(effort))) }
         fields.append(("sessionPermissionUpdates", "[]"))
         fields.append(("alwaysAllowedReasons", "[]"))
+        if let parentSessionID {
+            var link = [("sessionId", jsonString(parentSessionID)), ("taskId", jsonString("task_" + id.prefix(8)))]
+            if let copyTitle { link.append(("title", jsonString(copyTitle))) }
+            let members: [String] = link.map { jsonString($0.0) + ":" + $0.1 }
+            fields.append(("spawnedFrom", "{" + members.joined(separator: ",") + "}"))
+        }
 
         let members: [String] = fields.map { field in jsonString(field.0) + ":" + field.1 }
         let object: String = "{" + members.joined(separator: ",") + "}"

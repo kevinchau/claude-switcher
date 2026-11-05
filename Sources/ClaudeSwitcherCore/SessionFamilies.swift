@@ -104,3 +104,64 @@ public enum SessionFamilies {
         return Parent(id: parent.id, title: parent.title, isListed: isListed(id), isArchived: parent.isArchived)
     }
 }
+
+// MARK: - Copying a session with the sessions started from it
+
+extension SessionListing {
+    /// The listed sessions started from the one at `index`, at any depth: the rows right after
+    /// it that are deeper than it. Empty for a session nothing was started from.
+    public func descendants(ofSessionAt index: Int) -> ArraySlice<ListedSession> {
+        guard sessions.indices.contains(index) else { return [] }
+        let depth = sessions[index].depth
+        var end = index + 1
+        while end < sessions.count, sessions[end].depth > depth { end += 1 }
+        return sessions[(index + 1)..<end]
+    }
+}
+
+extension SessionFamilies {
+
+    /// What a family copy would take: the session, then each descendant that can be copied,
+    /// in listing order (every one after the session it was started from); and each that
+    /// cannot, with why.
+    public struct CopyPlan: Equatable, Sendable {
+        public struct LeftOut: Equatable, Sendable {
+            public let session: ListedSession
+            public let reason: SessionCopy.Refusal
+        }
+
+        public let members: [SessionCopy.FamilyMember]
+        public let leftOut: [LeftOut]
+
+        /// How many sessions besides the first would be copied.
+        public var startedCount: Int { max(members.count - 1, 0) }
+    }
+
+    /// `obstacle` says why one session cannot be copied to the target, or `nil`; a session's own
+    /// obstacle is checked first. `nil` when the session itself cannot be copied, has no
+    /// transcript id, or was not started from by anything listed.
+    public static func copyPlan(for session: ListedSession, descendants: ArraySlice<ListedSession>,
+                                obstacle: (ListedSession) -> SessionCopy.Refusal?) -> CopyPlan? {
+        guard !descendants.isEmpty, session.obstacle == nil, obstacle(session) == nil,
+              let root = member(session, parent: nil)
+        else { return nil }
+        var members = [root]
+        var leftOut: [CopyPlan.LeftOut] = []
+        for descendant in descendants {
+            if let reason = descendant.obstacle ?? obstacle(descendant) {
+                leftOut.append(CopyPlan.LeftOut(session: descendant, reason: reason))
+            } else if let member = member(descendant, parent: descendant.startedFrom?.id) {
+                members.append(member)
+            } else {
+                leftOut.append(CopyPlan.LeftOut(session: descendant, reason: .noTranscriptYet))
+            }
+        }
+        return CopyPlan(members: members, leftOut: leftOut)
+    }
+
+    private static func member(_ session: ListedSession, parent: String?) -> SessionCopy.FamilyMember? {
+        guard let cliSessionId = session.record.cliSessionId else { return nil }
+        return SessionCopy.FamilyMember(sessionID: session.id, cliSessionId: cliSessionId,
+                                        cwd: session.record.cwd, parentSessionID: parent)
+    }
+}

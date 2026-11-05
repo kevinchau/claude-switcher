@@ -87,9 +87,13 @@ final class SessionCopyChoice: NSObject {
     let title: String
     /// Only the current transcript is copied; the confirmation says so.
     let hasEarlierTranscripts: Bool
+    /// Set when the session is copied with the sessions started from it.
+    let family: SessionFamilies.CopyPlan?
+    /// Titles of the family's sessions by id, for the confirmation and the result.
+    let familyTitles: [String: String]
 
     init(sourceProfileID: String, targetProfileID: String, sessionID: String, cliSessionId: String, cwd: String, title: String,
-         hasEarlierTranscripts: Bool = false) {
+         hasEarlierTranscripts: Bool = false, family: SessionFamilies.CopyPlan? = nil, familyTitles: [String: String] = [:]) {
         self.sourceProfileID = sourceProfileID
         self.targetProfileID = targetProfileID
         self.sessionID = sessionID
@@ -97,6 +101,8 @@ final class SessionCopyChoice: NSObject {
         self.cwd = cwd
         self.title = title
         self.hasEarlierTranscripts = hasEarlierTranscripts
+        self.family = family
+        self.familyTitles = familyTitles
     }
 }
 
@@ -164,7 +170,7 @@ enum SessionMenu {
             menu.addItem(MenuBuilder.informationalItem("No open sessions with a transcript on this Mac."))
         }
         let others = input.config.profiles.filter { $0.id != profile.id }
-        for session in listing.sessions.prefix(listing.visibleCount(limit: SessionMenuData.visibleSessions)) {
+        for (index, session) in listing.sessions.prefix(listing.visibleCount(limit: SessionMenuData.visibleSessions)).enumerated() {
             let title = displayTitle(session)
             let row = NSMenuItem(title: shortened(title), action: nil, keyEquivalent: "")
             // Indented under the session it was started from, as in the Code tab's sidebar.
@@ -175,7 +181,8 @@ enum SessionMenu {
                 row.setAccessibilityLabel("\(title), started from \(parentTitle(parent)), \(badge)")
             }
             row.badge = NSMenuItemBadge(string: badge)
-            row.submenu = actionsMenu(for: session, title: title, source: profile, others: others,
+            row.submenu = actionsMenu(for: session, title: title, descendants: listing.descendants(ofSessionAt: index),
+                                      source: profile, others: others,
                                       data: data, isCopying: input.copyProgress != nil || input.switcher.isCommitting,
                                       now: input.now, target: target, action: action)
             menu.addItem(row)
@@ -191,7 +198,7 @@ enum SessionMenu {
     // MARK: - One session's actions
 
     private static func actionsMenu(
-        for session: ListedSession, title: String, source: Profile, others: [Profile],
+        for session: ListedSession, title: String, descendants: ArraySlice<ListedSession>, source: Profile, others: [Profile],
         data: SessionMenuData, isCopying: Bool, now: Date, target: AnyObject, action: Selector
     ) -> NSMenu {
         let menu = NSMenu()
@@ -229,7 +236,57 @@ enum SessionMenu {
             // A disabled item's tooltip is easy to miss; say why right under it.
             if let refusal { menu.addItem(MenuBuilder.informationalItem(refusal.message)) }
         }
+        if !descendants.isEmpty {
+            menu.addItem(.separator())
+            familyItems(for: session, title: title, cliSessionId: cliSessionId, descendants: descendants, source: source,
+                        others: others, data: data, isCopying: isCopying, target: target, action: action)
+                .forEach(menu.addItem)
+        }
         return menu
+    }
+
+    private static func hasEarlierTranscripts(in plan: SessionFamilies.CopyPlan, among sessions: [ListedSession]) -> Bool {
+        let copied = Set(plan.members.map(\.sessionID))
+        return sessions.contains { copied.contains($0.id) && $0.record.hasEarlierTranscripts }
+    }
+
+    /// "Copy with its N sessions to …" per account that can take the session itself, and what
+    /// would be left out, under it.
+    private static func familyItems(
+        for session: ListedSession, title: String, cliSessionId: String, descendants: ArraySlice<ListedSession>,
+        source: Profile, others: [Profile], data: SessionMenuData, isCopying: Bool, target: AnyObject, action: Selector
+    ) -> [NSMenuItem] {
+        var titles = [session.id: title]
+        for descendant in descendants { titles[descendant.id] = displayTitle(descendant) }
+        var items: [NSMenuItem] = []
+        for other in others {
+            let plan = SessionFamilies.copyPlan(for: session, descendants: descendants) { member in
+                data.obstacles[SessionMenuData.key(source: source.id, session: member.id, target: other.id)]
+                    ?? (data.unreadableStore != nil ? .storeUnreadable : nil)
+            }
+            guard let plan else { continue }
+            guard plan.startedCount > 0 else {
+                items.append(MenuBuilder.informationalItem("None of the sessions started from it can be copied to \(other.label)."))
+                continue
+            }
+            let count = plan.startedCount
+            let item = NSMenuItem(title: "Copy with its \(count) session\(count == 1 ? "" : "s") to \(other.label)\u{2026}",
+                                  action: action, keyEquivalent: "")
+            item.target = target
+            item.representedObject = SessionCopyChoice(
+                sourceProfileID: source.id, targetProfileID: other.id, sessionID: session.id,
+                cliSessionId: cliSessionId, cwd: session.record.cwd, title: title,
+                hasEarlierTranscripts: hasEarlierTranscripts(in: plan, among: [session] + descendants),
+                family: plan, familyTitles: titles)
+            item.isEnabled = !isCopying
+            item.toolTip = "Copies this session and the sessions started from it to \(other.label), listed under its copy. Nothing happens until you confirm."
+            items.append(item)
+            if !plan.leftOut.isEmpty {
+                let names = plan.leftOut.map { "\u{201C}\(shortened(titles[$0.session.id] ?? "", limit: 32))\u{201D}" }
+                items.append(MenuBuilder.informationalItem("Left out: " + names.joined(separator: ", ")))
+            }
+        }
+        return items
     }
 
     // MARK: - Text
@@ -382,6 +439,46 @@ enum CopyResult {
             }
             return Alert(isSuccess: false, title: "The copy is not finished", message: withNotes(detail, (own.map { [$0] } ?? []) + others))
         }
+    }
+
+    /// The one alert for a family copy: the first session's own result, then what became of
+    /// the sessions started from it, then what recovery did.
+    static func familyAlert(for results: [SessionCopy.FamilyResult], leftOut: [SessionFamilies.CopyPlan.LeftOut],
+                            titles: [String: String], notes: [SessionCopy.RecoveryNote],
+                            source: String, target: String, targetIsRunning: Bool) -> Alert {
+        guard let first = results.first else {
+            return Alert(isSuccess: false, title: "Nothing was copied", message: "There was nothing to copy.")
+        }
+        let rootTitle = titles[first.sessionID] ?? "Untitled session"
+        let rest = results.dropFirst()
+        let copied = rest.filter { if case .copied = $0.outcome { return true }; return false }
+        guard case .copied = first.outcome else {
+            // The first one's own alert says why; nothing else was attempted.
+            let own = alert(for: first.outcome, notes: notes, title: rootTitle, source: source, target: target,
+                            targetIsRunning: targetIsRunning)
+            return Alert(isSuccess: own.isSuccess, title: own.title,
+                         message: own.message + "\n\nThe sessions started from it were not copied.")
+        }
+        let own = alert(for: first.outcome, notes: [], title: rootTitle, source: source, target: target,
+                        targetIsRunning: targetIsRunning)
+        func quoted(_ id: String) -> String { "\u{201C}\(SessionMenu.shortened(titles[id] ?? "Untitled session"))\u{201D}" }
+        var lines: [String] = []
+        if !copied.isEmpty {
+            let count = copied.count
+            lines.append("\(count) session\(count == 1 ? "" : "s") started from it \(count == 1 ? "was" : "were") copied too, "
+                + "listed under its copy: " + copied.map { quoted($0.sessionID) }.joined(separator: ", ") + ".")
+        }
+        for result in rest {
+            switch result.outcome {
+            case .copied: continue
+            case .refused(let refusal): lines.append("Not copied: \(quoted(result.sessionID)). \(refusal.message)")
+            case .pendingRegistration(_, let detail): lines.append("Not finished: \(quoted(result.sessionID)). \(detail)")
+            }
+        }
+        for skipped in leftOut { lines.append("Left out: \(quoted(skipped.session.id)). \(skipped.reason.message)") }
+        let message = ([own.message] + lines + notes.map(\.message)).joined(separator: "\n\n")
+        // Left-out sessions were named before the copy; one that was tried and not copied is news.
+        return Alert(isSuccess: copied.count == rest.count, title: own.title, message: message)
     }
 
     /// The two accounts a confirmed copy is between, as the config says now — `nil` when either

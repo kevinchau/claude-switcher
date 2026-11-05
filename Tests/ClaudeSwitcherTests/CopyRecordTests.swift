@@ -34,6 +34,22 @@ final class CopyRecordTests: XCTestCase {
         XCTAssertEqual(Set(try object(data).keys), Set(CopyRecord.keys))
     }
 
+    /// Copied with the session it was started from: one more key, last, in Desktop's shape for
+    /// a session started from another that is not a side session.
+    func testALinkToTheParentsCopyIsTheLastKeyAndOnlyNamesThatCopy() throws {
+        let parent = "local_77777777-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let data = CopyRecord.bytes(forCopyOf: source(), newID: newID, now: now, parentSessionID: parent)
+        XCTAssertEqual(keys(data), CopyRecord.keys + ["spawnedFrom", "sessionId", "taskId", "title"])
+        let link = try XCTUnwrap(try object(data)["spawnedFrom"] as? [String: Any])
+        XCTAssertEqual(link["sessionId"] as? String, parent)
+        XCTAssertEqual(link["taskId"] as? String, "task_abcdef01")
+        XCTAssertEqual(link["title"] as? String, "Fix the build (copy)")
+        XCTAssertTrue(CopyRecord.isFree(data, ofSourceCliSessionId: x, sourceRecordID: sourceID))
+
+        let untitled = try object(CopyRecord.bytes(forCopyOf: source(title: nil), newID: newID, now: now, parentSessionID: parent))
+        XCTAssertEqual(Set(try XCTUnwrap(untitled["spawnedFrom"] as? [String: Any]).keys), ["sessionId", "taskId"])
+    }
+
     func testTheNewIdsAreTheLowercaseNewUUIDAndNothingElse() throws {
         let fields = try object(CopyRecord.bytes(forCopyOf: source(), newID: newID, now: now))
         let y = "abcdef01-2345-4678-89ab-cdef01234567"

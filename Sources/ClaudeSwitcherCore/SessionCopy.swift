@@ -149,13 +149,18 @@ public enum SessionCopy {
         public let sessionID: String                 // "local_<uuid>" as listed
         public let cliSessionId: String              // as listed — a stale row is refused
         public let cwd: String                       // as listed
+        /// The `local_<uuid>` of a copy, already filed in the target's store, of the session this
+        /// one was started from: the copy is listed under it there. Set by ``copyFamily``.
+        public let parentSessionID: String?
 
-        public init(source: Profile, target: Profile, sessionID: String, cliSessionId: String, cwd: String) {
+        public init(source: Profile, target: Profile, sessionID: String, cliSessionId: String, cwd: String,
+                    parentSessionID: String? = nil) {
             self.source = source
             self.target = target
             self.sessionID = sessionID
             self.cliSessionId = cliSessionId
             self.cwd = cwd
+            self.parentSessionID = parentSessionID
         }
     }
 
@@ -228,6 +233,9 @@ public enum SessionCopy {
         /// The switcher's own folder, where the journal goes, cannot rename exclusively.
         case journalFolderCannotRename
         case recordCheckFailed
+        /// Copying a session with the sessions started from it: the session it hangs under was
+        /// not copied, so it is not either.
+        case familyParentNotCopied
         case fileSystem(errno: Int32)
 
         public var message: String {
@@ -323,6 +331,8 @@ public enum SessionCopy {
                 return "This disk does not support the safe rename a copy relies on."
             case .journalFolderCannotRename:
                 return "Claude Switcher\u{2019}s settings folder (~/.config/claude-switcher) is on a disk that cannot rename safely, so it won\u{2019}t copy sessions."
+            case .familyParentNotCopied:
+                return "The session it was started from was not copied, so it was left out."
             case .recordCheckFailed:
                 return "The copy\u{2019}s record did not come out as intended, so nothing was filed."
             case .fileSystem(let code):
@@ -487,6 +497,77 @@ public enum SessionCopy {
         // ``unfinished(environment:)``, and what it finished by the menu's pending line.
         _ = CopyRecovery(profiles: allProfiles, environment: environment).run()
         return CopyRun(request: request, profiles: allProfiles, environment: environment).perform()
+    }
+
+    /// One session of a family to copy: a session and the sessions started from it.
+    public struct FamilyMember: Equatable, Sendable {
+        public let sessionID: String
+        public let cliSessionId: String
+        public let cwd: String
+        /// The session it was started from, if that one is in the family.
+        public let parentSessionID: String?
+
+        public init(sessionID: String, cliSessionId: String, cwd: String, parentSessionID: String?) {
+            self.sessionID = sessionID
+            self.cliSessionId = cliSessionId
+            self.cwd = cwd
+            self.parentSessionID = parentSessionID
+        }
+    }
+
+    /// What became of one member of a family copy.
+    public struct FamilyResult: Equatable, Sendable {
+        public let sessionID: String
+        public let outcome: Outcome
+
+        public init(sessionID: String, outcome: Outcome) {
+            self.sessionID = sessionID
+            self.outcome = outcome
+        }
+    }
+
+    /// Copies a session and the sessions started from it, each as ``copy(_:allProfiles:environment:)``
+    /// copies one session — one at a time, each with its own checks, journal and recovery.
+    ///
+    /// `members` starts with the session the family is copied from; every other member comes
+    /// after the one it was started from. A member's copy is filed under the copy of its
+    /// nearest ancestor in the family that was copied (``Request/parentSessionID``), so a
+    /// member left out does not take its own sessions out of the family. Only a finished copy
+    /// counts: a copy left for registration may still be undone by recovery. A member working
+    /// in another folder than that copy is copied without a link, at the top level: Desktop
+    /// re-resolves the folder of a linked session that differs from its parent's when it
+    /// resumes it, which a plain copy never has done to it. If the first
+    /// member is not copied, nothing else is attempted — every other member is refused
+    /// ``Refusal/familyParentNotCopied``. Blocking; call off the main thread.
+    public static func copyFamily(_ members: [FamilyMember], from source: Profile, to target: Profile,
+                                  allProfiles: [Profile], environment: Environment = .live) -> [FamilyResult] {
+        let parentOf = Dictionary(members.map { ($0.sessionID, $0.parentSessionID) }, uniquingKeysWith: { first, _ in first })
+        var copies: [String: String] = [:]
+        let cwdOf = Dictionary(members.map { ($0.sessionID, $0.cwd) }, uniquingKeysWith: { first, _ in first })
+        var results: [FamilyResult] = []
+        for (index, member) in members.enumerated() {
+            var parentCopy: String?
+            if index > 0 {
+                guard let first = members.first, copies[first.sessionID] != nil else {
+                    results.append(FamilyResult(sessionID: member.sessionID, outcome: .refused(.familyParentNotCopied)))
+                    continue
+                }
+                var ancestor = member.parentSessionID
+                var steps = 0
+                while let current = ancestor, copies[current] == nil, steps < members.count {
+                    ancestor = parentOf[current] ?? nil
+                    steps += 1
+                }
+                let linked = ancestor.flatMap { copies[$0] == nil ? nil : $0 } ?? first.sessionID
+                parentCopy = cwdOf[linked] == member.cwd ? copies[linked] : nil
+            }
+            let request = Request(source: source, target: target, sessionID: member.sessionID,
+                                  cliSessionId: member.cliSessionId, cwd: member.cwd, parentSessionID: parentCopy)
+            let outcome = copy(request, allProfiles: allProfiles, environment: environment)
+            if case .copied(let success) = outcome { copies[member.sessionID] = success.newSessionID }
+            results.append(FamilyResult(sessionID: member.sessionID, outcome: outcome))
+        }
+        return results
     }
 
     /// Finishes or cleans up interrupted copies. Does nothing without the automation lock.

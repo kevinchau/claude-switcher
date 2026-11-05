@@ -403,7 +403,17 @@ final class CopyRun {
 
     private func stageRecord() throws {
         let now = environment.now()
-        recordBytes = CopyRecord.bytes(forCopyOf: record, newID: newID, now: now)
+        // A parent link names a copy this switcher filed in the target's store: a record id,
+        // never the original's, and there now as a plain file.
+        if let parent = request.parentSessionID {
+            guard parent.hasPrefix(SessionStore.recordPrefix),
+                  SessionStore.isUUID(String(parent.dropFirst(SessionStore.recordPrefix.count))),
+                  parent.lowercased() != record.id.lowercased(),
+                  let status = try? pair.target.store.status(of: parent + SessionStore.recordSuffix),
+                  status.kind == .regular
+            else { throw SessionCopy.Refusal.familyParentNotCopied }
+        }
+        recordBytes = CopyRecord.bytes(forCopyOf: record, newID: newID, now: now, parentSessionID: request.parentSessionID)
         guard CopyRecord.isFree(recordBytes, ofSourceCliSessionId: x, sourceRecordID: record.id) else {
             throw SessionCopy.Refusal.recordCheckFailed
         }

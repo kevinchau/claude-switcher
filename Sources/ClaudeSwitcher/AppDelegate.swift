@@ -608,12 +608,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let caveats = SessionCopy.confirmationCaveats(sourceLabel: shownSource.label, targetLabel: shownTarget.label, cwd: choice.cwd,
                                                       hasEarlierTranscripts: choice.hasEarlierTranscripts)
         let alert = NSAlert()
-        alert.messageText = "Copy \u{201C}\(SessionMenu.shortened(choice.title))\u{201D} to \(shownTarget.label)?"
+        let quotedTitle = "\u{201C}\(SessionMenu.shortened(choice.title))\u{201D}"
+        var reading = caveats.dropFirst(2).map { "\u{2022} " + $0 }
+        if let family = choice.family {
+            let count = family.startedCount
+            alert.messageText = "Copy \(quotedTitle) and \(count) session\(count == 1 ? "" : "s") started from it to \(shownTarget.label)?"
+            func quoted(_ id: String) -> String { "\u{201C}\(SessionMenu.shortened(choice.familyTitles[id] ?? "Untitled session"))\u{201D}" }
+            var lines = ["Copied with it, each as its own session listed under the copy: "
+                + family.members.dropFirst().map { quoted($0.sessionID) }.joined(separator: ", ") + "."]
+            lines += family.leftOut.map { "Left out: \(quoted($0.session.id)). \($0.reason.message)" }
+            lines.append("The copies are listed together but are not linked side sessions: they do not wake the copied "
+                + "session or share its folder setup. A session working in another folder than the one it was started "
+                + "from is copied at the top level. The copied conversation still names the original sessions.")
+            lines.append("Deleting the copied session later in \(shownTarget.label) leaves its copied sessions in place, "
+                + "with a note that the session that started them was deleted.")
+            reading = lines.map { "\u{2022} " + $0 } + reading
+        } else {
+            alert.messageText = "Copy \(quotedTitle) to \(shownTarget.label)?"
+        }
         alert.informativeText = caveats.prefix(2).joined(separator: "\n\n")
-        if caveats.count > 2 {
-            alert.accessoryView = Self.readingView(
-                caveats.dropFirst(2).map { "\u{2022} " + $0 }.joined(separator: "\n\n"),
-                size: NSSize(width: 440, height: 170))
+        if !reading.isEmpty {
+            alert.accessoryView = Self.readingView(reading.joined(separator: "\n\n"), size: NSSize(width: 440, height: 170))
         }
         alert.addButton(withTitle: "Copy")
         alert.addButton(withTitle: "Cancel")
@@ -633,14 +648,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        copyProgress = "Copying \u{201C}\(SessionMenu.shortened(choice.title))\u{201D} to \(target.label)\u{2026}"
+        let withSessions = choice.family.map { " and \($0.startedCount) session\($0.startedCount == 1 ? "" : "s")" } ?? ""
+        copyProgress = "Copying \u{201C}\(SessionMenu.shortened(choice.title))\u{201D}\(withSessions) to \(target.label)\u{2026}"
         rebuildIfVisible()
 
-        let request = SessionCopy.Request(source: source, target: target, sessionID: choice.sessionID,
-                                          cliSessionId: choice.cliSessionId, cwd: choice.cwd)
         let profiles = config.profiles
         let environment = copyEnvironment
         let title = choice.title
+        if let family = choice.family {
+            let titles = choice.familyTitles
+            Task.detached(priority: .userInitiated) {
+                let results = SessionCopy.copyFamily(family.members, from: source, to: target,
+                                                     allProfiles: profiles, environment: environment)
+                await MainActor.run {
+                    self.familyCopyDidFinish(results, leftOut: family.leftOut, titles: titles, source: source, target: target)
+                }
+            }
+            return
+        }
+        let request = SessionCopy.Request(source: source, target: target, sessionID: choice.sessionID,
+                                          cliSessionId: choice.cliSessionId, cwd: choice.cwd)
         Task.detached(priority: .userInitiated) {
             let outcome = SessionCopy.copy(request, allProfiles: profiles, environment: environment)
             await MainActor.run { self.copyDidFinish(outcome, title: title, source: source, target: target) }
@@ -694,6 +721,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+    }
+
+    /// As ``copyDidFinish``: recovery first when any member was not copied, then one alert.
+    private func familyCopyDidFinish(_ results: [SessionCopy.FamilyResult], leftOut: [SessionFamilies.CopyPlan.LeftOut],
+                                     titles: [String: String], source: Profile, target: Profile) {
+        let allCopied = results.allSatisfy { if case .copied = $0.outcome { return true }; return false }
+        guard !allCopied, automationLock != nil, configError == nil else {
+            presentFamilyCopyResult(results, leftOut: leftOut, titles: titles, source: source, target: target, notes: [])
+            return
+        }
+        let profiles = config.profiles
+        let environment = copyEnvironment
+        Task.detached(priority: .userInitiated) {
+            let notes = SessionCopy.recover(allProfiles: profiles, environment: environment)
+            await MainActor.run {
+                self.lastRecoveryNotes = notes
+                self.presentFamilyCopyResult(results, leftOut: leftOut, titles: titles, source: source, target: target, notes: notes)
+            }
+        }
+    }
+
+    private func presentFamilyCopyResult(_ results: [SessionCopy.FamilyResult], leftOut: [SessionFamilies.CopyPlan.LeftOut],
+                                         titles: [String: String], source: Profile, target: Profile,
+                                         notes: [SessionCopy.RecoveryNote]) {
+        copyProgress = nil
+        running = InstanceManager.runningInstances(appPath: config.claudeAppPath)
+        rebuildIfVisible()
+        refreshSessions()
+        let alert = CopyResult.familyAlert(for: results, leftOut: leftOut, titles: titles, notes: notes,
+                                           source: source.label, target: target.label,
+                                           targetIsRunning: ProfileMatching.isRunning(target, in: running))
+        presentAlert(style: alert.isSuccess ? .informational : .warning, title: alert.title, message: alert.message)
+        considerSwitcherInstall()
     }
 
     /// One alert for a finished copy attempt, with what recovery then did, if anything.

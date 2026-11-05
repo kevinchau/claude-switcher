@@ -110,4 +110,39 @@ final class SessionFamiliesTests: XCTestCase {
         XCTAssertEqual(shape(sessions), ["S1", "S2", "  S3", "    S4", "S5"])
         XCTAssertEqual([0, 1, 2, 3, 4, 5, 9, -1].map { listing.visibleCount(limit: $0) }, [0, 1, 4, 4, 4, 5, 5, 0])
     }
+
+    func testAFamilyCopyTakesEveryDescendantThatCanBeCopiedAndSaysWhyNotForTheRest() {
+        let sessions = arrange([
+            record(1, at: 500),
+            record(2, at: 400, from: 1),
+            record(3, at: 390, from: 2),
+            record(4, at: 380, from: 1),
+            record(5, at: 300),
+        ]).map { session in
+            ListedSession(record: SessionRecord(id: session.record.id, cliSessionId: "c-\(session.id)", title: session.record.title,
+                                                cwd: "/p", lastActivityAt: session.record.lastActivityAt,
+                                                spawnedFromSessionId: session.record.spawnedFromSessionId),
+                          transcriptBytes: 1, isRunning: false, obstacle: nil,
+                          depth: session.depth, startedFrom: session.startedFrom, startedCount: session.startedCount)
+        }
+        let listing = SessionListing(location: .none, sessions: sessions, hidden: .init())
+        XCTAssertEqual(listing.descendants(ofSessionAt: 0).map(\.id), [2, 3, 4].map(id))
+        XCTAssertEqual(listing.descendants(ofSessionAt: 1).map(\.id), [id(3)])
+        XCTAssertTrue(listing.descendants(ofSessionAt: 4).isEmpty)
+        XCTAssertTrue(listing.descendants(ofSessionAt: 9).isEmpty)
+
+        let plan = SessionFamilies.copyPlan(for: sessions[0], descendants: listing.descendants(ofSessionAt: 0)) {
+            $0.id == self.id(2) ? .inWorktree : nil
+        }
+        XCTAssertEqual(plan?.members.map(\.sessionID), [1, 3, 4].map(id))
+        XCTAssertEqual(plan?.members.map(\.parentSessionID), [nil, id(2), id(1)])
+        XCTAssertEqual(plan?.leftOut.map(\.session.id), [id(2)])
+        XCTAssertEqual(plan?.leftOut.map(\.reason), [.inWorktree])
+        XCTAssertEqual(plan?.startedCount, 2)
+
+        XCTAssertNil(SessionFamilies.copyPlan(for: sessions[0], descendants: listing.descendants(ofSessionAt: 0)) {
+            $0.id == self.id(1) ? .stillReplying : nil
+        }, "no family copy when the session itself cannot be copied")
+        XCTAssertNil(SessionFamilies.copyPlan(for: sessions[4], descendants: []) { _ in nil })
+    }
 }
