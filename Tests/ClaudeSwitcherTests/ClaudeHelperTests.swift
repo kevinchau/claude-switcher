@@ -94,6 +94,11 @@ final class ClaudeHelperTests: XCTestCase {
                        "/a/claude.app/Contents/MacOS/claude")
     }
 
+    /// What Finder is shown: the folder, because selecting the bundle counts as modifying it.
+    func testTheFolderIsTheOneHoldingTheBundle() {
+        XCTAssertEqual(ClaudeHelper.Location(version: "1", bundlePath: "/a/1/bbb/claude.app").folderPath, "/a/1/bbb")
+    }
+
     // MARK: Who signed it
 
     private let team = "AAAAAAAAAA"

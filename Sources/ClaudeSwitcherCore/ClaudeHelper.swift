@@ -22,6 +22,11 @@ public enum ClaudeHelper {
         }
 
         public var executablePath: String { bundlePath + "/Contents/MacOS/claude" }
+
+        /// The folder holding the bundle: what Finder is shown, never the bundle itself. Selecting
+        /// an app with `activateFileViewerSelecting` counts as modifying it, and macOS blocks that
+        /// with "was prevented from modifying apps" (README §2.15).
+        public var folderPath: String { (bundlePath as NSString).deletingLastPathComponent }
     }
 
     /// What the menu item found.

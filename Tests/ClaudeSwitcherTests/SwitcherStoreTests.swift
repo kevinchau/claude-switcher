@@ -465,6 +465,16 @@ final class SwitcherHygieneTests: XCTestCase {
         XCTAssertEqual(processes, 1, "only SwitcherProcess.run starts a process")
     }
 
+    /// Selecting an app this way counts as modifying it, and macOS blocks that with "was prevented
+    /// from modifying apps" (§2.15). The one call left reveals the ~/.claude folder.
+    func testNoAppBundleIsHandedToFinder() throws {
+        var calls = 0
+        for (_, text) in try source("Sources/ClaudeSwitcher") {
+            calls += text.components(separatedBy: "activateFileViewerSelecting").count - 1
+        }
+        XCTAssertEqual(calls, 1)
+    }
+
     /// An old process may keep running after the swap only because nothing is loaded lazily from
     /// its bundle, which by then holds the new version.
     func testTheAppLoadsNothingLazilyFromItsBundle() throws {

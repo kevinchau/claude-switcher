@@ -1538,16 +1538,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         your Mail, Messages, Safari data and other apps\u{2019} files without asking, including \
         anything a session is tricked into running.
 
-        Only you can turn this on. Claude Switcher will show you the program in Finder and open \
-        the right page of System Settings. Drag \u{201C}claude\u{201D} into the list, or add it \
-        with the + button; the list may call it Claude Code. New Code sessions pick it up; ones \
-        already running do not.
+        Only you can turn this on. Claude Switcher will open the program\u{2019}s folder in Finder \
+        and the right page of System Settings. Drag \u{201C}claude\u{201D} into the list, or add \
+        it with the + button; the list may call it Claude Code. New Code sessions pick it up; \
+        ones already running do not.
         """
         alert.addButton(withTitle: "Show Me")
         alert.addButton(withTitle: "Cancel")
         guard runModal(alert) == .alertFirstButtonReturn else { return }
 
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: helper.bundlePath)])
+        NSWorkspace.shared.open(URL(fileURLWithPath: helper.folderPath, isDirectory: true))
         if !NSWorkspace.shared.open(ClaudeHelper.fullDiskAccessSettings) {
             presentAlert(
                 style: .informational,
