@@ -262,7 +262,6 @@ public enum Diagnostics {
         public var pathLocation: String?
         public var sidecarVersion: String?
         public var sidecarPath: String?
-        public var isResolved: Bool { pathVersion != nil || sidecarVersion != nil }
     }
 
     public struct Probe: Sendable {
@@ -308,33 +307,25 @@ public enum Diagnostics {
 
     public static func probeCLI() -> CLIProbe {
         let location = locateOnSearchPath("claude")
-        let pathVersion = firstLine(of: run("/usr/bin/env", ["claude", "--version"]))
         let sidecar = newestSidecarExecutable()
         let sidecarVersion = sidecar.flatMap { firstLine(of: run($0.path, ["--version"])) }
         return CLIProbe(
-            pathVersion: pathVersion,
+            pathVersion: pathCLIVersion(),
             pathLocation: location,
             sidecarVersion: sidecarVersion,
             sidecarPath: sidecar?.path
         )
     }
 
-    /// The app-managed sidecar Claude Desktop uses for the Code tab:
-    /// ~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude
-    /// Returns the highest version present.
+    /// The `claude` on the PATH, which is what "Copy terminal command" drives.
+    static func pathCLIVersion() -> String? {
+        firstLine(of: run("/usr/bin/env", ["claude", "--version"]))
+    }
+
+    /// The app-managed sidecar Claude Desktop uses for the Code tab, the highest version present.
     static func newestSidecarExecutable() -> URL? {
-        let root = URL(fileURLWithPath: Config.defaultUserDataDir())
-            .appendingPathComponent("claude-code")
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return nil }
-        let candidates: [(version: String, url: URL)] = entries.compactMap { name in
-            let executable = root
-                .appendingPathComponent(name)
-                .appendingPathComponent("claude.app/Contents/MacOS/claude")
-            guard FileManager.default.isExecutableFile(atPath: executable.path) else { return nil }
-            return (name, executable)
-        }
-        // .numeric compares digit runs as numbers, so 1.2.10 sorts above 1.2.9.
-        return candidates.max { $0.version.compare($1.version, options: .numeric) == .orderedAscending }?.url
+        ClaudeHelper.newest(userDataDirs: [Config.defaultUserDataDir()])
+            .map { URL(fileURLWithPath: $0.executablePath) }
     }
 
     // MARK: Report

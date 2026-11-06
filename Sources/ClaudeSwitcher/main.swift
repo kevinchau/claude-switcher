@@ -52,7 +52,22 @@ private func runDryRun() -> Int32 {
     print(Diagnostics.launchPlan(config: config, running: running, update: update, usage: usage,
                                  updateAttempts: updateAttempts, updateBlocks: updateBlocks,
                                  switcher: switcherDryRunLine(config: config, now: now), now: now))
+    print(macOSPromptsDryRunLine(config: config))
     return 0
+}
+
+/// What **Stop macOS Prompts for Claude\u{2026}** would find, its signatures checked off the network.
+private func macOSPromptsDryRunLine(config: Config) -> String {
+    let check = ClaudeHelper.check(appPath: config.claudeAppPath, userDataDirs: ClaudeHelper.userDataDirs(of: config),
+                                   verify: CodeSignature.verifier(flags: CodeSignature.offlineFlags))
+    switch check {
+    case .notInstalled:
+        return "macOS prompts: the Code tab\u{2019}s program is not installed yet"
+    case .unverified(let bundlePath, let reason):
+        return "macOS prompts: would refuse \(bundlePath): \(reason)"
+    case .ready(let helper):
+        return "macOS prompts: would show \(helper.version) at \(helper.bundlePath)"
+    }
 }
 
 /// What this copy would do about updating itself, from state.json: read, never fetched. The

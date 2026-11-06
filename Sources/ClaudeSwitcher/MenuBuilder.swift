@@ -17,6 +17,7 @@ enum MenuBuilder {
         var removeProfile: Selector
         var chooseClaudeApp: Selector
         var revealSharedDirectory: Selector
+        var stopMacOSPrompts: Selector
         var showDiagnostics: Selector
         var showWelcome: Selector
         var toggleLaunchAtLogin: Selector
@@ -288,6 +289,11 @@ enum MenuBuilder {
         welcomeItem.target = target
         welcomeItem.toolTip = "How Claude Switcher works, in one window. Opening Claude Switcher again while it is running shows it too."
         menu.addItem(welcomeItem)
+
+        let promptsItem = NSMenuItem(title: "Stop macOS Prompts for Claude\u{2026}", action: actions.stopMacOSPrompts, keyEquivalent: "")
+        promptsItem.target = target
+        promptsItem.toolTip = "For \u{201C}claude would like to access data from other apps\u{201D}, which keeps coming back however often you allow it."
+        menu.addItem(promptsItem)
 
         let diagnosticsItem = NSMenuItem(title: "Diagnostics\u{2026}", action: actions.showDiagnostics, keyEquivalent: "")
         diagnosticsItem.target = target

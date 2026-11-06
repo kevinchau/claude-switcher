@@ -79,9 +79,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isBusy = false
     private var launchGeneration = 0
     private var isMenuOpen = false
-    /// No claude CLI was found at launch — neither on the PATH nor the app's own sidecar.
+    /// No claude CLI was found on the PATH at launch.
     /// Said where it matters, in "Copy terminal command", not in an alert at startup.
     private var cliIsMissing = false
+    /// **Stop macOS Prompts for Claude…** is hashing signatures; a second click would queue a
+    /// second alert.
+    private var isCheckingMacOSPrompts = false
 
     /// A downloaded Claude update whose installer is waiting on the running instances, as of
     /// the last time the menu opened.
@@ -163,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         removeProfile: #selector(removeProfile(_:)),
         chooseClaudeApp: #selector(chooseClaudeApp(_:)),
         revealSharedDirectory: #selector(revealSharedDirectory(_:)),
+        stopMacOSPrompts: #selector(stopMacOSPrompts(_:)),
         showDiagnostics: #selector(showDiagnostics(_:)),
         showWelcome: #selector(showWelcome(_:)),
         toggleLaunchAtLogin: #selector(toggleLaunchAtLogin(_:)),
@@ -770,21 +774,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         considerSwitcherInstall()
     }
 
-    /// Resolves the claude CLI two ways; if neither is present the terminal submenu says so.
-    /// Note: the Desktop Code tab runs the app-managed sidecar under
-    /// ~/Library/Application Support/Claude/claude-code/<version>/..., NOT the PATH binary;
-    /// the PATH binary is what "Copy terminal command" drives. Startup never blocks on this.
+    /// Looks for the claude CLI on the PATH, which is what "Copy terminal command" drives; the
+    /// terminal submenu says so when there is none. The Desktop Code tab's app-managed sidecar
+    /// under ~/Library/Application Support/Claude/claude-code/<version>/... cannot stand in for
+    /// it, so it is not counted and not started here. Startup never blocks on this.
     private func checkCLIAvailability() {
         Task.detached(priority: .utility) {
-            let probe = Diagnostics.probeCLI()
-            await MainActor.run { self.handleCLIProbe(probe) }
+            let missing = Diagnostics.pathCLIVersion() == nil
+            await MainActor.run { self.handleCLIProbe(missing: missing) }
         }
     }
 
     /// No alert: at first launch it landed on top of the welcome window and read as an error,
     /// when switching Desktop accounts needs nothing but Claude.app.
-    private func handleCLIProbe(_ probe: Diagnostics.CLIProbe) {
-        let missing = !probe.isResolved
+    private func handleCLIProbe(missing: Bool) {
         guard missing != cliIsMissing else { return }
         cliIsMissing = missing
         rebuildIfVisible()
@@ -1476,6 +1479,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: - macOS prompts
+
+    /// Finds the Code tab's program and proves who signed it, off the main thread: the check
+    /// hashes a 300 MB program.
+    @objc private func stopMacOSPrompts(_ sender: NSMenuItem) {
+        noteUserActivity()
+        guard !isCheckingMacOSPrompts else { return }
+        isCheckingMacOSPrompts = true
+        let appPath = config.claudeAppPath
+        let userDataDirs = ClaudeHelper.userDataDirs(of: config)
+        Task {
+            let check = await Task.detached(priority: .userInitiated) {
+                ClaudeHelper.check(appPath: appPath, userDataDirs: userDataDirs, verify: CodeSignature.verifier())
+            }.value
+            self.isCheckingMacOSPrompts = false
+            self.handleMacOSPromptsCheck(check)
+        }
+    }
+
+    private func handleMacOSPromptsCheck(_ check: ClaudeHelper.Check) {
+        switch check {
+        case .notInstalled:
+            presentAlert(
+                style: .informational,
+                title: "Nothing to set up yet",
+                message: "The prompt comes from the program behind Claude\u{2019}s Code tab, which appears the first time you use that tab."
+            )
+        case .unverified(let bundlePath, let reason):
+            presentAlert(
+                style: .warning,
+                title: "Claude Switcher will not recommend this program",
+                message: """
+                Full Disk Access is the most macOS can give a program, and the one found here cannot be vouched for: \(reason).
+
+                \(bundlePath)
+
+                If Claude is updating right now, try again in a minute. Otherwise, reinstalling Claude should put it right.
+                """
+            )
+        case .ready(let helper):
+            confirmFullDiskAccess(for: helper)
+        }
+    }
+
+    /// Only ever shows the program and the page. The switch itself is the user's (hard rule 26).
+    private func confirmFullDiskAccess(for helper: ClaudeHelper.Location) {
+        let alert = NSAlert()
+        alert.messageText = "Stop the \u{201C}data from other apps\u{201D} prompts?"
+        alert.informativeText = """
+        They come from the program behind the Code tab, which macOS treats separately from \
+        Claude.app. Clicking Allow does not end them, and a permission given to Claude.app does \
+        not reach it. The one blanket setting macOS offers is Full Disk Access for that program.
+
+        This is a real trade-off. Every Code session, and everything it runs, could then read \
+        your Mail, Messages, Safari data and other apps\u{2019} files without asking, including \
+        anything a session is tricked into running.
+
+        Only you can turn this on. Claude Switcher will show you the program in Finder and open \
+        the right page of System Settings. Drag \u{201C}claude\u{201D} into the list, or add it \
+        with the + button; the list may call it Claude Code. New Code sessions pick it up; ones \
+        already running do not.
+        """
+        alert.addButton(withTitle: "Show Me")
+        alert.addButton(withTitle: "Cancel")
+        guard runModal(alert) == .alertFirstButtonReturn else { return }
+
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: helper.bundlePath)])
+        if !NSWorkspace.shared.open(ClaudeHelper.fullDiskAccessSettings) {
+            presentAlert(
+                style: .informational,
+                title: "System Settings did not open",
+                message: "Open System Settings, then Privacy & Security, then Full Disk Access."
+            )
+        }
     }
 
     // MARK: - Welcome window

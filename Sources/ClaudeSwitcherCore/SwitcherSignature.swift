@@ -100,6 +100,12 @@ public enum CodeSignature {
         developerID + " and certificate leaf[subject.OU] = \"\(try validTeam(team))\" and notarized"
     }
 
+    /// Another program from a team, as ``ClaudeHelper`` asks of the Code tab's: Developer ID and
+    /// the team, with nothing about a name or a notarization that is not this app's to pin.
+    public static func requirementForDeveloper(team: String) throws -> String {
+        developerID + " and certificate leaf[subject.OU] = \"\(try validTeam(team))\""
+    }
+
     // Both go into requirement text between quotes; nothing that could close the quote passes.
     private static func validTeam(_ team: String) throws -> String {
         guard Pattern.matches("^[A-Z0-9]{10}$", team) else { throw RequirementError.invalidTeam(team) }
