@@ -456,7 +456,13 @@ final class SessionListingTests: XCTestCase {
 
     func testTheConfirmationNamesBothAccountsAndTheSharedFolder() {
         let caveats = SessionCopy.confirmationCaveats(sourceLabel: "Personal", targetLabel: "Work", cwd: "/Users/me/app")
-        XCTAssertEqual(caveats.count, 9)
+        XCTAssertEqual(caveats.count, 10)
+        // What the other account pays and loses comes first among the ones to read, and names
+        // the way to carry less across.
+        XCTAssertTrue(caveats[2].contains("Work\u{2019}s first reply rereads the whole conversation"), caveats[2])
+        XCTAssertTrue(caveats[2].contains("cannot use the thinking"), caveats[2])
+        XCTAssertTrue(caveats[2].contains("/compact in the original before copying"), caveats[2])
+        XCTAssertFalse(caveats.joined().contains("slower than usual"))
         XCTAssertTrue(caveats.contains { $0.contains("Personal") })
         XCTAssertTrue(caveats.contains { $0.contains("Work\u{2019}s Code tab the next time") })
         XCTAssertTrue(caveats.contains { $0.contains("(/Users/me/app)") })

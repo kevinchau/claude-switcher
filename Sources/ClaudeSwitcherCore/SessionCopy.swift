@@ -754,6 +754,12 @@ public enum SessionCopy {
             "The copy appears in \(targetLabel)\u{2019}s Code tab the next time that Claude starts. Claude Switcher will not quit "
                 + "Claude for you. Quit it yourself when its sessions are idle and open it again. Closing the window or "
                 + "View > Reload is not enough.",
+            // Seen on the first live copy (README §2.13): the other account has no cache of the
+            // conversation, and thinking is bound to the organisation that produced it.
+            "\(targetLabel)\u{2019}s first reply rereads the whole conversation, which counts against \(targetLabel)\u{2019}s "
+                + "usage: the longer the conversation, the more. If \(targetLabel) is in another organisation, Claude there "
+                + "also cannot use the thinking behind the earlier replies, and says so once; the conversation itself is "
+                + "complete. To carry over a summary instead, run /compact in the original before copying.",
             "Keep the original in \(sourceLabel) until you have opened the copy in \(targetLabel). Until then nothing renews the "
                 + "copy\u{2019}s files, and rewind points from before the copy only carry over if the original still exists when "
                 + "the copy is first continued.",
@@ -764,7 +770,7 @@ public enum SessionCopy {
                 + "Browser actions ask per site. Connectors, allowed-tool grants and Remote Control are not carried over; "
                 + "\(targetLabel)\u{2019}s own connectors apply.",
             "If \(targetLabel)\u{2019}s plan does not include the original\u{2019}s model, the first reply shows a model error; "
-                + "choose another with /model. The first reply may be slower than usual.",
+                + "choose another with /model.",
             "A copy taken shortly after Claude was working may end mid-turn; that turn shows as interrupted in the copy.",
             "A session Claude has hidden from history stays hidden in the copy.",
         ]
